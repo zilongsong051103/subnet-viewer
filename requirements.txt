@@ -1,0 +1,4 @@
+# bittensor v11 rewrote its API; app.py targets this version.
+bittensor==11.1.0
+fastapi>=0.110
+uvicorn[standard]>=0.30

@@ -1,0 +1,786 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Subnet viewer</title>
+<script>
+  // Apply a saved Light/Dark choice before first paint so reloads don't flash.
+  try {
+    const saved = localStorage.getItem("subnet-viewer:theme");
+    if (saved === "light" || saved === "dark") document.documentElement.dataset.theme = saved;
+  } catch { /* storage blocked: follow the device */ }
+</script>
+<style>
+  :root {
+    color-scheme: light;
+    --page: #f7f7f5;
+    --surface: #fcfcfb;
+    --ink: #2b2a27;
+    --ink-2: #6b6a64;
+    --hairline: #e6e5df;
+    --divider: #dddcd5;
+    --skeleton: #ecebe6;
+    --shimmer: #f7f6f3;
+    --rule: #cfcec6;
+    --border: rgba(11, 11, 11, 0.08);
+    --good: #2e7d3a;
+    --bad: #c24d4a;
+    --accent: #3b7dd0;
+    --logo-bg: #ffffff;
+  }
+  /* Dark palette: when the device prefers dark (unless Light is chosen), or when Dark is chosen. */
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      color-scheme: dark;
+      --page: #111110;
+      --surface: #1b1b1a;
+      --ink: #e4e2dc;
+      --ink-2: #9a988f;
+      --hairline: #292927;
+      --divider: #353532;
+      --skeleton: #262624;
+      --shimmer: #30302d;
+      --rule: #4d4c48;
+      --border: rgba(255, 255, 255, 0.07);
+      --good: #5da868;
+      --bad: #d27a74;
+      --accent: #6a9ad8;
+      --logo-bg: #dcdad3;
+    }
+  }
+  :root[data-theme="dark"] {
+    color-scheme: dark;
+    --page: #111110;
+    --surface: #1b1b1a;
+    --ink: #e4e2dc;
+    --ink-2: #9a988f;
+    --hairline: #292927;
+    --divider: #353532;
+    --skeleton: #262624;
+    --shimmer: #30302d;
+    --rule: #4d4c48;
+    --border: rgba(255, 255, 255, 0.07);
+    --good: #5da868;
+    --bad: #d27a74;
+    --accent: #6a9ad8;
+    --logo-bg: #dcdad3;
+  }
+
+  * { box-sizing: border-box; }
+  [hidden] { display: none !important; }
+  body {
+    margin: 0;
+    background: var(--page);
+    color: var(--ink);
+    font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  main { max-width: 1720px; margin: 0 auto; padding: 16px 16px 32px; }
+
+  .top {
+    display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between;
+    gap: 8px 24px; margin-bottom: 16px;
+  }
+  h1 { font-size: 16px; font-weight: 600; margin: 0; }
+  .picker { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+  .picker label, .updated, .hint { color: var(--ink-2); }
+  .updated { font-size: 13px; }
+  .theme { display: inline-flex; border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
+  .theme button { border: 0; border-radius: 0; padding: 6px 10px; color: var(--ink-2); }
+  .theme button + button { border-left: 1px solid var(--border); }
+  .theme button[aria-pressed="true"] { background: var(--hairline); color: var(--ink); font-weight: 600; }
+  select, button {
+    font: inherit; color: var(--ink); background: var(--surface);
+    border: 1px solid var(--border); border-radius: 8px; padding: 6px 10px;
+  }
+  select { max-width: 100%; }
+  button { cursor: pointer; }
+  button:hover { background: var(--hairline); }
+  :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .error { color: var(--bad); margin: 0 0 12px; }
+  .hint { margin: 0; }
+
+  .grid {
+    display: grid; gap: 24px; /* cards in a row stretch to the same height */
+    grid-template-columns: repeat(auto-fill, minmax(min(520px, 100%), 1fr));
+  }
+  .card {
+    --pad: 14px;
+    display: flex; flex-direction: column;
+    background: var(--surface); border: 1px solid var(--border); border-radius: 10px;
+    padding: 12px var(--pad) 14px; transition: opacity 0.15s;
+  }
+  /* Clean layout: one line under the header; spacing, not lines, separates the rest. */
+  .bar {
+    margin-inline: calc(-1 * var(--pad)); padding-inline: var(--pad); padding-bottom: 12px;
+    border-bottom: 1px solid var(--divider);
+  }
+  .visually-hidden { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+  /* Controls stay quiet until needed: the drag handle shows on hover (always on touch screens). */
+  .bar { position: relative; }
+  @media (hover: hover) {
+    /* Out of the header's flow, in the card's left gutter, so it costs the title no room. */
+    .card .handle { position: absolute; left: calc(var(--pad) / 2 - 6px); margin: 0; padding: 0; font-size: 15px; opacity: 0; transition: opacity 0.15s; }
+    .card:hover .handle, .card .handle:focus-visible { opacity: 1; }
+  }
+  /* Refreshes dim the card and keep its numbers; only the first load shows a skeleton. */
+  .card.loading:not(.pending) { opacity: 0.55; }
+  .card.preview { border: 1px dashed var(--rule); }
+  .card.flash { animation: flash 1.2s ease-out; }
+  @keyframes flash { from { box-shadow: 0 0 0 3px var(--accent); } to { box-shadow: 0 0 0 3px transparent; } }
+  @media (prefers-reduced-motion: reduce) { .card.flash { animation: none; } }
+
+  .bar { display: flex; align-items: center; gap: 8px; }
+  /* Long names wrap rather than truncate, so the 🛡️ badge is never cut off. */
+  .bar h2 {
+    flex: 1; min-width: 0; margin: 0; font-size: 20px; font-weight: 600;
+    line-height: 1.25; overflow-wrap: anywhere;
+  }
+  .handle {
+    border: 0; background: none; padding: 2px 4px; margin-left: -4px; color: var(--ink-2);
+    font-size: 18px; line-height: 1; cursor: grab; touch-action: none;
+  }
+  .card.preview .handle { display: none; }
+  .card.dragging { opacity: 0.6; box-shadow: 0 0 0 2px var(--accent); }
+  body.reordering, body.reordering * { cursor: grabbing !important; user-select: none; }
+  .logo {
+    flex: none; display: grid; place-items: center; width: 30px; height: 30px; overflow: hidden;
+    border: 1px solid var(--border); border-radius: 50%; background: var(--hairline);
+    color: var(--ink-2); font-size: 15px; font-weight: 600;
+  }
+  /* Logos sit on white so dark artwork stays visible in dark mode. */
+  .logo.has-img { background: var(--logo-bg); }
+  .logo img { width: 100%; height: 100%; object-fit: cover; }
+  .icon-link {
+    flex: none; display: grid; place-items: center; width: 28px; height: 28px;
+    border-radius: 6px; color: var(--ink-2); opacity: 0.8;
+  }
+  .icon-link:hover { background: var(--hairline); color: var(--ink); opacity: 1; }
+  .star { border: 0; background: none; padding: 2px 6px; margin-right: -6px; color: var(--ink-2); white-space: nowrap; }
+  .star[aria-pressed="true"] { color: var(--ink); font-size: 17px; line-height: 1.2; }
+
+  /* Price, reg fee and burn: three equal groups, each marked by a bar on its left. */
+  .stats {
+    display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px;
+    margin-block: 0 16px; padding-block: 14px 0;
+  }
+  .stat { display: flex; flex-direction: column; min-width: 0; padding-left: 10px; border-left: 3px solid var(--rule); }
+  .stat-label { color: var(--ink-2); font-size: 12px; line-height: 1.3; }
+  .stat-line { white-space: nowrap; }
+  .stat-value { font-size: 18px; font-weight: 600; line-height: 1.3; }
+  .stat-value.tight { font-size: 14px; } /* set by fitStats() for values too long for their group */
+  /* The 24h change (or burn amount) always sits on its own line, so every card has the same shape. */
+  .delta { display: block; min-height: 1.3em; color: var(--ink-2); font-size: 13px; line-height: 1.3; }
+  .delta.good { color: var(--good); }
+  .delta.bad { color: var(--bad); }
+
+  .table-wrap { overflow-x: auto; }
+  table { width: 100%; border-collapse: collapse; font-size: 14px; line-height: 1.3; }
+  th, td { text-align: left; padding: 4px 8px; white-space: nowrap; }
+  th:first-child, td:first-child { padding-left: 0; }
+  th:last-child, td:last-child { padding-right: 0; }
+  th { color: var(--ink-2); font-weight: 400; font-size: 12px; padding-bottom: 6px; }
+  /* Totals may wrap after the slash on narrow screens instead of overflowing. */
+  tfoot td { border-top: 1px solid var(--hairline); padding-top: 8px; font-weight: 600; white-space: normal; }
+  .muted { color: var(--ink-2); font-weight: 400; }
+  .num { text-align: right; font-variant-numeric: tabular-nums; }
+  .hotkey {
+    font: 13px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    background: none; border: 0; border-radius: 4px; padding: 1px 3px; margin: -1px -3px; color: var(--ink-2);
+  }
+  /* Owner chip, right-aligned in the header: total balance / locked. Details on hover, Taostats on click. */
+  .owner-chip {
+    flex: none; display: inline-flex; align-items: center; gap: 4px; padding: 3px 9px;
+    border-radius: 999px; background: var(--hairline); color: var(--ink);
+    font-size: 12px; font-weight: 600; white-space: nowrap; text-decoration: none;
+  }
+  .owner-chip:hover { background: var(--divider); }
+  .chip-sep { color: var(--ink-2); font-weight: 400; }
+  .badge { margin-left: 4px; cursor: help; }
+  .shield { width: 1em; height: 1em; vertical-align: -0.14em; }
+  .card-error { margin: 2px 0 0; font-size: 14px; color: var(--bad); }
+  .body { flex: 1; display: flex; flex-direction: column; }
+  .empty {
+    flex: 1; display: grid; place-items: center; min-height: 96px; margin: 0;
+    color: var(--ink-2); font-size: 20px; font-weight: 500; text-align: center; cursor: default;
+  }
+
+  .sk, .card.pending .logo {
+    background: linear-gradient(90deg, var(--skeleton) 30%, var(--shimmer) 50%, var(--skeleton) 70%);
+    background-size: 300% 100%;
+    animation: shimmer 1.4s ease-in-out infinite;
+  }
+  .sk { display: block; border-radius: 4px; }
+  @keyframes shimmer { from { background-position: 100% 0; } to { background-position: 0 0; } }
+  @media (prefers-reduced-motion: reduce) { .sk, .card.pending .logo { animation: none; } }
+  .sk-label { width: 44px; height: 10px; margin: 4px 0 6px; }
+  .sk-value { width: 104px; height: 20px; }
+  .sk-rows { display: grid; gap: 11px; padding-top: 6px; }
+  .sk-row { height: 14px; }
+  .sk-row:nth-child(odd) { width: 94%; }
+  .card-error { color: var(--bad); }
+
+  @media (max-width: 480px) {
+    .card { --pad: 8px; }
+    .bar h2 { font-size: 18px; }
+    /* Phones: the owner chip drops to its own line (still right-aligned), so names keep the first line. */
+    .bar { flex-wrap: wrap; row-gap: 0; }
+    .bar::after { content: ""; order: 98; flex-basis: 100%; }
+    .owner-chip { order: 99; margin: 4px 0 0 auto; padding: 2px 7px; font-size: 11px; }
+    th, td { padding-inline: 3px; }
+    /* Price and reg fee values can be long (τ0.001275); burn never exceeds "100.0%". */
+    .stats { gap: 8px; grid-template-columns: minmax(0, 1.1fr) minmax(0, 1.1fr) minmax(0, 0.8fr); }
+    .stat { padding-left: 8px; }
+    .stat-value { font-size: 16px; }
+  }
+</style>
+</head>
+<body>
+<!-- Two-tone immunity shield, drawn once and reused. -->
+<svg width="0" height="0" style="position: absolute" aria-hidden="true">
+  <symbol id="shield" viewBox="0 0 24 24">
+    <path style="fill: var(--surface)" d="M12 2l8 3v6c0 5.5-3.4 9.7-8 11-4.6-1.3-8-5.5-8-11V5z"/>
+    <path style="fill: var(--ink)" d="M12 2 4 5v6c0 5.5 3.4 9.7 8 11z"/>
+    <path style="fill: none; stroke: var(--ink); stroke-width: 1.6; stroke-linejoin: round"
+          d="M12 2l8 3v6c0 5.5-3.4 9.7-8 11-4.6-1.3-8-5.5-8-11V5z"/>
+  </symbol>
+</svg>
+<template id="shield-template"><svg class="shield" aria-hidden="true"><use href="#shield"/></svg></template>
+<main>
+  <header class="top">
+    <h1>Subnet viewer</h1>
+    <div class="picker">
+      <label for="netuid" class="visually-hidden">Subnet</label>
+      <select id="netuid"><option value="">Loading…</option></select>
+      <button type="button" id="refresh">Refresh</button>
+      <div class="theme" role="group" aria-label="Theme">
+        <button type="button" data-theme-choice="system" title="Follow your device setting">Auto</button>
+        <button type="button" data-theme-choice="light">Light</button>
+        <button type="button" data-theme-choice="dark">Dark</button>
+      </div>
+      <span id="updated" class="updated"></span>
+    </div>
+  </header>
+
+  <p id="error" class="error" role="alert" hidden></p>
+  <p id="hint" class="hint" hidden>Choose a subnet, then click ☆ Watch on its card to add it to your watch list.</p>
+  <div id="grid" class="grid" aria-live="polite"></div>
+</main>
+
+<template id="card-template">
+  <article class="card">
+    <header class="bar">
+      <button type="button" class="handle" data-field="handle"
+              title="Drag to reorder, or click and use the arrow keys" aria-label="Reorder: use the arrow keys">⠿</button>
+      <span class="logo" data-field="logo" aria-hidden="true">
+        <img data-field="logo-img" alt="" referrerpolicy="no-referrer" hidden>
+        <span data-field="logo-fallback"></span>
+      </span>
+      <h2><span data-field="title"></span><span class="badge" role="img" data-field="subnet-immune" hidden><svg class="shield" aria-hidden="true"><use href="#shield"/></svg></span></h2>
+      <a class="owner-chip" data-field="owner" target="_blank" rel="noopener noreferrer" hidden>
+        <span data-field="owner-balance"></span><span class="chip-sep">/</span><span data-field="owner-locked"></span><span class="chip-sep">τ</span>
+      </a>
+      <a class="icon-link" data-field="website" target="_blank" rel="noopener noreferrer" aria-label="Website" hidden>
+        <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8"
+             stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <circle cx="12" cy="12" r="9"/><path d="M3 12h18"/><path d="M12 3a14 14 0 0 1 0 18a14 14 0 0 1 0-18"/>
+        </svg>
+      </a>
+      <a class="icon-link" data-field="github" target="_blank" rel="noopener noreferrer" aria-label="GitHub" hidden>
+        <svg viewBox="0 0 16 16" width="18" height="18" fill="currentColor" aria-hidden="true">
+          <path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/>
+        </svg>
+      </a>
+      <button type="button" class="star" data-field="star"></button>
+    </header>
+    <p class="card-error" data-field="error" hidden></p>
+    <div data-field="skeleton" aria-hidden="true">
+      <div class="stats">
+        <div class="stat"><span class="sk sk-label"></span><span class="sk sk-value"></span></div>
+        <div class="stat"><span class="sk sk-label"></span><span class="sk sk-value"></span></div>
+        <div class="stat"><span class="sk sk-label"></span><span class="sk sk-value"></span></div>
+      </div>
+      <div class="sk-rows">
+        <span class="sk sk-row"></span><span class="sk sk-row"></span><span class="sk sk-row"></span>
+        <span class="sk sk-row"></span><span class="sk sk-row"></span><span class="sk sk-row"></span>
+      </div>
+    </div>
+    <div class="body" data-field="body" hidden>
+      <div class="stats">
+        <div class="stat">
+          <span class="stat-label">Price</span>
+          <span class="stat-line"><span class="stat-value" data-field="price"></span><span class="delta" data-field="price-delta"></span></span>
+        </div>
+        <div class="stat">
+          <span class="stat-label">Reg fee</span>
+          <span class="stat-line"><span class="stat-value" data-field="fee"></span><span class="delta" data-field="fee-delta"></span></span>
+        </div>
+        <div class="stat" data-field="burn-stat">
+          <span class="stat-label">Burn</span>
+          <span class="stat-line"><span class="stat-value" data-field="burn"></span><span class="delta" data-field="burn-full"></span></span>
+        </div>
+      </div>
+      <div class="table-wrap" data-field="table">
+        <table>
+          <thead>
+            <tr>
+              <th scope="col" class="num">UID</th>
+              <th scope="col">Hotkey</th>
+              <th scope="col" class="num" title="Share of the subnet's daily miner emission (the burned part counts toward the whole)">Share</th>
+              <th scope="col" class="num">Daily TAO</th>
+            </tr>
+          </thead>
+          <tbody data-field="miners"></tbody>
+          <tfoot>
+            <tr>
+              <td colspan="2" data-field="total-label"></td>
+              <td class="num" data-field="total-share"></td>
+              <td class="num" data-field="total-tao"></td>
+            </tr>
+          </tfoot>
+        </table>
+      </div>
+      <p class="empty" data-field="empty" hidden>No emission</p>
+    </div>
+  </article>
+</template>
+
+<script>
+  const $ = (id) => document.getElementById(id);
+  const REFRESH_MS = 60_000;
+  const WATCH_KEY = "subnet-viewer:watchlist";
+
+  const grid = $("grid");
+  const cards = new Map(); // netuid -> card
+  let subnetNames = new Map(); // netuid -> name
+  let watch = loadWatch(); // newest first
+  let selected = Number(new URLSearchParams(location.search).get("netuid")) || null;
+  if (!selected && watch.length === 0) selected = 1;
+
+  // The watch list lives in this browser only; without storage it lasts the visit.
+  function loadWatch() {
+    try {
+      const saved = JSON.parse(localStorage.getItem(WATCH_KEY) || "[]");
+      return Array.isArray(saved) ? saved.filter(Number.isInteger) : [];
+    } catch {
+      return [];
+    }
+  }
+  function saveWatch() {
+    try {
+      localStorage.setItem(WATCH_KEY, JSON.stringify(watch));
+    } catch { /* storage blocked */ }
+  }
+
+  function num(v) {
+    const abs = Math.abs(v);
+    if (abs === 0) return "0";
+    if (abs >= 1000) return v.toLocaleString("en-US", { maximumFractionDigits: 0 });
+    if (abs >= 1) return v.toLocaleString("en-US", { maximumFractionDigits: 2 });
+    return v.toLocaleString("en-US", { maximumSignificantDigits: 4 });
+  }
+  const tao = (v) => (v == null ? "—" : `τ${num(v)}`);
+  // Table columns keep two decimals so values line up.
+  const colNum = (v) =>
+    Math.abs(v) >= 1
+      ? v.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+      : num(v);
+  const share = (part, whole) => {
+    if (!whole) return "—";
+    const pct = (part / whole) * 100;
+    // Whole percents; an earning miner never reads as 0%.
+    return pct > 0 && pct < 0.5 ? "<1%" : `${Math.round(pct)}%`;
+  };
+  // Compact TAO for owner amounts: "1.96k τ", "43.32k τ", "1.20M τ", "0.18 τ".
+  const kTao = (v) => {
+    if (v == null) return "—";
+    const abs = Math.abs(v);
+    if (abs >= 1e6) return `${(v / 1e6).toFixed(2)}M τ`;
+    if (abs >= 1e3) return `${(v / 1e3).toFixed(2)}k τ`;
+    return `${v.toFixed(2)} τ`;
+  };
+  // Wrap a subnet symbol in direction isolates: RTL symbols (e.g. Hebrew) would otherwise scramble nearby text.
+  const sym = (s) => `\u2068${s || ""}\u2069`;
+  const kNum = (v) => kTao(v).replace(/ τ$/, ""); // kTao without the unit, for "1.94k / 1.52k τ"
+  const shortKey = (key) => `${key.slice(0, 6)}…${key.slice(-5)}`;
+  const subnetLabel = (netuid) => `SN${netuid}${subnetNames.get(netuid) ? ` · ${subnetNames.get(netuid)}` : ""}`;
+
+  async function getJSON(url) {
+    const res = await fetch(url);
+    const body = await res.json().catch(() => ({}));
+    if (res.ok) return body;
+    // FastAPI sends a string for our errors and a list of issues for invalid input.
+    const detail = Array.isArray(body.detail) ? body.detail.map((d) => d.msg).join("; ") : body.detail;
+    throw new Error(detail || `Request failed (${res.status})`);
+  }
+
+  // upIsGood: true colors a rise green and a fall red; null keeps it neutral.
+  function setDelta(el, stat, upIsGood) {
+    el.className = "delta";
+    const pct = stat.change_pct;
+    if (pct == null) {
+      el.textContent = "";
+      el.title = "";
+      return;
+    }
+    const shown = pct.toFixed(2);
+    const dir = Math.sign(Number(shown)); // a change that rounds to 0.00% is flat
+    // Flat changes get no arrow, so only real moves draw the eye.
+    el.textContent = `${dir > 0 ? "▲ +" : dir < 0 ? "▼ " : ""}${dir === 0 ? "0.00" : shown}%`;
+    el.title = `24h change (24h ago: ${tao(stat.tao_24h_ago)})`;
+    if (dir !== 0 && upIsGood !== null) el.classList.add((dir > 0) === upIsGood ? "good" : "bad");
+  }
+
+  // Immunity time left, e.g. "~20h more (5,924 blocks)".
+  function immunityLeft(blocks) {
+    const hours = (blocks * 12) / 3600;
+    const time = hours < 1 ? "<1h" : hours < 48 ? `~${Math.round(hours)}h` : `~${Math.round(hours / 24)} days`;
+    return `${time} more (${blocks.toLocaleString("en-US")} blocks)`;
+  }
+
+  // A shortened address that copies the full one when clicked.
+  function keyButton(address) {
+    const key = document.createElement("button");
+    key.type = "button";
+    key.className = "hotkey";
+    key.textContent = shortKey(address);
+    key.title = `${address}\nClick to copy`;
+    key.addEventListener("click", async () => {
+      try {
+        await navigator.clipboard.writeText(address);
+        key.textContent = "Copied";
+        setTimeout(() => (key.textContent = shortKey(address)), 1200);
+      } catch { /* clipboard unavailable; the full key is in the tooltip */ }
+    });
+    return key;
+  }
+
+  function minerRow(miner, fullDailyAlpha) {
+    const tr = document.createElement("tr");
+    const cell = (content, cls) => {
+      const td = document.createElement("td");
+      if (cls) td.className = cls;
+      td.append(content);
+      tr.append(td);
+    };
+
+    const who = document.createDocumentFragment();
+    who.append(keyButton(miner.hotkey));
+    if (miner.immune_blocks_left > 0) {
+      const badge = document.createElement("span");
+      badge.className = "badge";
+      badge.append($("shield-template").content.firstElementChild.cloneNode(true));
+      badge.setAttribute("role", "img");
+      badge.title = `Immune miner: can't be deregistered for ${immunityLeft(miner.immune_blocks_left)}`;
+      badge.setAttribute("aria-label", badge.title);
+      who.append(badge);
+    }
+
+    cell(String(miner.uid), "num");
+    cell(who);
+    cell(share(miner.daily_alpha, fullDailyAlpha), "num");
+    cell(`τ${colNum(miner.daily_tao)}`, "num");
+    return tr;
+  }
+
+  function createCard(netuid) {
+    const el = $("card-template").content.firstElementChild.cloneNode(true);
+    const card = { netuid, el, seq: 0, field: (name) => el.querySelector(`[data-field="${name}"]`) };
+    el.dataset.netuid = netuid;
+    el.classList.add("pending"); // no data yet: skeleton until the first response
+    card.field("title").textContent = subnetLabel(netuid);
+    card.field("star").addEventListener("click", () => toggleWatch(netuid));
+    enableReorder(card);
+    return card;
+  }
+
+  // Watched cards move by dragging their handle (mouse or touch), or with arrow keys on it.
+  function enableReorder(card) {
+    const handle = card.field("handle");
+    handle.addEventListener("pointerdown", (e) => {
+      if (!watch.includes(card.netuid) || e.button !== 0) return;
+      e.preventDefault();
+      card.el.classList.add("dragging");
+      document.body.classList.add("reordering");
+
+      const onMove = (ev) => {
+        if (ev.clientY < 60) scrollBy(0, -12);
+        else if (ev.clientY > innerHeight - 60) scrollBy(0, 12);
+        const target = document.elementFromPoint(ev.clientX, ev.clientY)?.closest(".card");
+        if (!target || target === card.el || target.classList.contains("preview")) return;
+        const els = [...grid.children];
+        if (els.indexOf(card.el) < els.indexOf(target)) target.after(card.el);
+        else target.before(card.el);
+      };
+      const onEnd = () => {
+        removeEventListener("pointermove", onMove);
+        removeEventListener("pointerup", onEnd);
+        removeEventListener("pointercancel", onEnd);
+        card.el.classList.remove("dragging");
+        document.body.classList.remove("reordering");
+        watch = [...grid.children].map((el) => Number(el.dataset.netuid)).filter((n) => watch.includes(n));
+        saveWatch();
+      };
+      // Listen on the window, not the handle: moving the card in the DOM mid-drag
+      // drops pointer capture, and the release would never reach the handle.
+      addEventListener("pointermove", onMove);
+      addEventListener("pointerup", onEnd);
+      addEventListener("pointercancel", onEnd);
+    });
+    handle.addEventListener("keydown", (e) => {
+      const step = { ArrowLeft: -1, ArrowUp: -1, ArrowRight: 1, ArrowDown: 1 }[e.key];
+      const from = watch.indexOf(card.netuid);
+      const to = from + (step ?? 0);
+      if (!step || from < 0 || to < 0 || to >= watch.length) return;
+      e.preventDefault();
+      [watch[from], watch[to]] = [watch[to], watch[from]];
+      saveWatch();
+      layout();
+      handle.focus();
+    });
+  }
+
+  function renderCard(card, d) {
+    const f = card.field;
+    card.el.classList.remove("pending");
+    f("skeleton").hidden = true;
+    f("body").hidden = false;
+    f("title").textContent = `SN${d.netuid} · ${d.name || "Unnamed"} ${sym(d.symbol)}`;
+    const subnetImmune = f("subnet-immune");
+    subnetImmune.hidden = !(d.immune_blocks_left > 0);
+    subnetImmune.title = `Immune subnet: can't be deregistered for ${immunityLeft(d.immune_blocks_left)}`;
+    subnetImmune.setAttribute("aria-label", subnetImmune.title);
+
+    // Logo, falling back to the token symbol when there is none or it fails to load.
+    const logo = f("logo");
+    const img = f("logo-img");
+    const showLogo = (loaded) => {
+      img.hidden = !loaded;
+      f("logo-fallback").hidden = loaded;
+      logo.classList.toggle("has-img", loaded);
+    };
+    f("logo-fallback").textContent = d.symbol || "";
+    if (!d.logo_url) {
+      img.removeAttribute("src");
+      showLogo(false);
+    } else if (img.getAttribute("src") !== d.logo_url) {
+      showLogo(false);
+      img.onload = () => showLogo(true);
+      img.onerror = () => showLogo(false);
+      img.src = d.logo_url;
+    }
+
+    for (const [field, label] of [["website", "Website"], ["github", "GitHub"]]) {
+      const link = f(field);
+      const url = d.links[field];
+      link.hidden = !url;
+      if (url) {
+        link.href = url;
+        link.title = `${label}: ${url}`;
+      } else {
+        link.removeAttribute("href");
+      }
+    }
+
+    f("price").textContent = tao(d.alpha_price.tao);
+    setDelta(f("price-delta"), d.alpha_price, true);
+    f("fee").textContent = tao(d.registration_fee.tao);
+    setDelta(f("fee-delta"), d.registration_fee, null);
+
+    const emitting = d.alpha_emission_per_block > 0;
+    const pct = emitting ? d.miner_burn.pct : null;
+    f("burn").textContent = pct == null ? "—" : `${pct.toFixed(1)}%`;
+    f("burn-full").textContent = pct == null ? "" : `(${tao(d.miner_burn.full_daily_tao)})`;
+    f("burn-stat").title = emitting
+      ? `Share of last epoch's miner emission ${d.miner_burn.mode === "recycle" ? "recycled" : "burned"} via owner hotkeys.\n` +
+        `In brackets: all miner emission per day if nothing were burned ` +
+        `(${colNum(d.miner_burn.full_daily_alpha)} ${sym(d.symbol)} = ${tao(d.miner_burn.full_daily_tao)}).`
+      : "This subnet isn't receiving any emission right now";
+
+    // Owner chip: total balance / locked stake, both in TAO; details on hover, Taostats on click.
+    const owner = d.owner;
+    f("owner").hidden = !owner;
+    if (owner) {
+      const chip = f("owner");
+      chip.href = `https://taostats.io/account/${encodeURIComponent(owner.coldkey)}`;
+      f("owner-balance").textContent = kNum(owner.balance_tao);
+      f("owner-locked").textContent =
+        owner.locked_alpha == null ? "—" : owner.locked_alpha === 0 ? "0" : kNum(owner.locked_tao);
+      const balanceLine = owner.balance_tao == null ? "Balance unavailable"
+        : `Balance ${kTao(owner.balance_tao)}: free τ${colNum(owner.free_tao)} + staked τ${colNum(owner.staked_tao)} (root τ${colNum(owner.root_staked_tao)})`;
+      const lockLine = owner.locked_alpha == null ? "Lock unavailable"
+        : owner.locked_alpha === 0 ? "Lock: nothing locked on this subnet"
+        : `Lock ${num(owner.locked_alpha)} ${sym(d.symbol)} = ${kTao(owner.locked_tao)}` +
+          (owner.stake_alpha ? ` (${Math.round((owner.locked_alpha / owner.stake_alpha) * 100)}% of the owner's stake here)` : "");
+      chip.title = `Subnet owner: total balance / locked stake\n${balanceLine}\n${lockLine}\nClick to open the owner on Taostats`;
+      chip.setAttribute("aria-label",
+        `Owner balance ${f("owner-balance").textContent} τ, locked ${f("owner-locked").textContent} τ. Opens Taostats`);
+    }
+
+    // Shares are of all miner emission, burned part included, so shares + Burn % ≈ 100%.
+    const fullDailyAlpha = d.miner_burn.full_daily_alpha;
+    f("miners").replaceChildren(...d.top_miners.map((m) => minerRow(m, fullDailyAlpha)));
+    const totals = d.miner_totals;
+    const topAlpha = d.top_miners.reduce((sum, m) => sum + m.daily_alpha, 0);
+    const topTao = d.top_miners.reduce((sum, m) => sum + m.daily_tao, 0);
+    // "Top 5 / All 113": the top-5 figure leads, the all-miners figure is muted.
+    const pair = (field, lead, rest) => {
+      const muted = document.createElement("span");
+      muted.className = "muted";
+      muted.textContent = ` / ${rest}`;
+      f(field).replaceChildren(lead, muted);
+    };
+    pair("total-label", `Top ${d.top_miners.length}`, `All ${totals.count}`);
+    pair("total-share", share(topAlpha, fullDailyAlpha), share(totals.daily_alpha, fullDailyAlpha));
+    pair("total-tao", `τ${colNum(topTao)}`, `τ${colNum(totals.daily_tao)}`);
+
+    const hasMiners = d.top_miners.length > 0;
+    f("table").hidden = !hasMiners;
+    f("empty").hidden = hasMiners;
+    f("empty").title = emitting
+      ? "No miners earned emission last epoch, apart from the owner's own hotkeys"
+      : "This subnet isn't receiving any emission right now";
+
+    $("updated").textContent = `Updated ${new Date().toLocaleTimeString()}`;
+    fitStats(card);
+  }
+
+  // Shrink a stat value that doesn't fit its group (e.g. τ0.0005623 on a narrow phone).
+  function fitStats(card) {
+    for (const value of card.el.querySelectorAll(".body .stat-value")) {
+      value.classList.remove("tight");
+      const stat = value.closest(".stat");
+      if (stat.scrollWidth > stat.clientWidth + 1) value.classList.add("tight");
+    }
+  }
+  let fitQueued = false;
+  addEventListener("resize", () => {
+    if (fitQueued) return;
+    fitQueued = true;
+    requestAnimationFrame(() => {
+      fitQueued = false;
+      cards.forEach(fitStats);
+    });
+  });
+
+  async function load(card) {
+    const seq = ++card.seq;
+    card.el.classList.add("loading");
+    try {
+      const data = await getJSON(`/api/subnets/${card.netuid}`);
+      if (seq !== card.seq) return;
+      renderCard(card, data);
+      card.field("error").hidden = true;
+    } catch (e) {
+      if (seq !== card.seq) return;
+      card.field("skeleton").hidden = true;
+      card.el.classList.remove("pending");
+      card.field("error").textContent = e.message;
+      card.field("error").hidden = false;
+    } finally {
+      if (seq === card.seq) card.el.classList.remove("loading");
+    }
+  }
+
+  function setStar(card, watched) {
+    const star = card.field("star");
+    star.textContent = watched ? "★" : "☆ Watch";
+    star.title = watched ? "Remove from watch list" : "Add to watch list";
+    star.setAttribute("aria-label", star.title);
+    star.setAttribute("aria-pressed", String(watched));
+    card.el.classList.toggle("preview", !watched);
+  }
+
+  // Cards shown: the selected subnet first when it isn't watched, then the watch list.
+  function layout() {
+    const order = selected && !watch.includes(selected) ? [selected, ...watch] : [...watch];
+    for (const [netuid, card] of cards) {
+      if (!order.includes(netuid)) {
+        card.el.remove();
+        cards.delete(netuid);
+      }
+    }
+    for (const netuid of order) {
+      let card = cards.get(netuid);
+      if (!card) {
+        card = createCard(netuid);
+        cards.set(netuid, card);
+        load(card);
+      }
+      setStar(card, watch.includes(netuid));
+      grid.append(card.el);
+    }
+    $("hint").hidden = order.length > 0;
+    updatePicker();
+  }
+
+  function toggleWatch(netuid) {
+    watch = watch.includes(netuid) ? watch.filter((n) => n !== netuid) : [netuid, ...watch];
+    saveWatch();
+    layout();
+  }
+
+  function updatePicker() {
+    const ids = new Set([...subnetNames.keys(), ...watch]);
+    if (selected) ids.add(selected);
+    const options = [...ids]
+      .sort((a, b) => a - b)
+      .map((n) => new Option(`${watch.includes(n) ? "★ " : ""}${subnetLabel(n)}`, n));
+    $("netuid").replaceChildren(new Option("Choose a subnet…", ""), ...options);
+    $("netuid").value = selected ? String(selected) : "";
+  }
+
+  async function loadSubnetList() {
+    try {
+      const subnets = await getJSON("/api/subnets");
+      subnetNames = new Map(subnets.map((s) => [s.netuid, s.name]));
+    } catch (e) {
+      $("error").textContent = `Couldn't load the subnet list: ${e.message}`;
+      $("error").hidden = false;
+    }
+    updatePicker();
+  }
+
+  $("netuid").addEventListener("change", (e) => {
+    selected = Number(e.target.value) || null;
+    history.replaceState(null, "", selected ? `?netuid=${selected}` : location.pathname);
+    layout();
+    const card = cards.get(selected);
+    if (card) {
+      card.el.scrollIntoView({ block: "nearest" });
+      card.el.classList.remove("flash");
+      void card.el.offsetWidth; // restart the animation
+      card.el.classList.add("flash");
+    }
+  });
+  const refreshAll = () => cards.forEach(load);
+  $("refresh").addEventListener("click", refreshAll);
+  setInterval(() => document.visibilityState === "visible" && refreshAll(), REFRESH_MS);
+
+  // Theme: Auto follows the device; Light/Dark are saved in this browser.
+  const THEME_KEY = "subnet-viewer:theme";
+  function applyTheme(choice) {
+    if (choice === "light" || choice === "dark") document.documentElement.dataset.theme = choice;
+    else delete document.documentElement.dataset.theme;
+    document.querySelectorAll("[data-theme-choice]").forEach((button) =>
+      button.setAttribute("aria-pressed", String(button.dataset.themeChoice === choice)));
+  }
+  let themeChoice = "system";
+  try {
+    themeChoice = localStorage.getItem(THEME_KEY) || "system";
+  } catch { /* storage blocked */ }
+  applyTheme(themeChoice);
+  document.querySelectorAll("[data-theme-choice]").forEach((button) =>
+    button.addEventListener("click", () => {
+      themeChoice = button.dataset.themeChoice;
+      try {
+        localStorage.setItem(THEME_KEY, themeChoice);
+      } catch { /* storage blocked: the choice lasts this visit */ }
+      applyTheme(themeChoice);
+    }));
+
+  layout();
+  loadSubnetList();
+</script>
+</body>
+</html>
