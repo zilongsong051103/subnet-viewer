@@ -83,8 +83,22 @@
   }
   h1 { font-size: 16px; font-weight: 600; margin: 0; }
   .picker { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
-  .picker label, .updated, .hint { color: var(--ink-2); }
-  .updated { font-size: 13px; }
+  .picker label, .hint { color: var(--ink-2); }
+  /* Ring counting down to the next update; click it to update now. */
+  .tick {
+    display: grid; place-items: center; padding: 4px; border-radius: 50%;
+    color: var(--ink-2); line-height: 0;
+  }
+  .tick:hover { background: var(--hairline); color: var(--ink); }
+  .tick svg { width: 18px; height: 18px; }
+  .tick circle { fill: none; stroke-width: 3; }
+  .tick .track { stroke: var(--divider); }
+  .tick .ring { stroke: var(--accent); transition: stroke-dashoffset 1s linear; }
+  /* While the cards reload, the ring becomes a spinning arc instead of a countdown. */
+  .tick.busy .ring { transition: none; }
+  .tick.busy svg { animation: spin 0.9s linear infinite; }
+  @keyframes spin { to { transform: rotate(1turn); } }
+  @media (prefers-reduced-motion: reduce) { .tick.busy svg { animation-duration: 2.4s; } }
   .navlink { margin-left: 8px; font-size: 13px; font-weight: 400; color: var(--accent); text-decoration: none; white-space: nowrap; }
   .navlink:hover { text-decoration: underline; }
   /* Seed Lab password box, shown over the dashboard before going there. */
@@ -185,6 +199,8 @@
   }
   .stat { display: flex; flex-direction: column; min-width: 0; padding-left: 10px; border-left: 3px solid var(--rule); }
   .stat-label { color: var(--ink-2); font-size: 12px; line-height: 1.3; }
+  /* Where this subnet's alpha price ranks among all subnets: #1 is the dearest. */
+  .rank { color: var(--ink); font-weight: 600; font-variant-numeric: tabular-nums; cursor: help; }
   .stat-line { white-space: nowrap; }
   .stat-value { font-size: 18px; font-weight: 600; line-height: 1.3; }
   .stat-value.tight { font-size: 14px; } /* set by fitStats() for values too long for their group */
@@ -271,13 +287,22 @@
     <div class="picker">
       <label for="netuid" class="visually-hidden">Subnet</label>
       <select id="netuid"><option value="">Loading…</option></select>
-      <button type="button" id="refresh">Refresh</button>
+      <label for="sort" class="visually-hidden">Order of the subnet list</label>
+      <select id="sort" title="Order of the subnet list">
+        <option value="netuid">By netuid</option>
+        <option value="price">By price rank</option>
+      </select>
       <div class="theme" role="group" aria-label="Theme">
         <button type="button" data-theme-choice="system" title="Follow your device setting">Auto</button>
         <button type="button" data-theme-choice="light">Light</button>
         <button type="button" data-theme-choice="dark">Dark</button>
       </div>
-      <span id="updated" class="updated"></span>
+      <button type="button" id="tick" class="tick">
+        <svg viewBox="0 0 24 24" aria-hidden="true">
+          <circle class="track" cx="12" cy="12" r="9"/>
+          <circle class="ring" cx="12" cy="12" r="9" transform="rotate(-90 12 12)"/>
+        </svg>
+      </button>
     </div>
   </header>
 
@@ -344,7 +369,7 @@
     <div class="body" data-field="body" hidden>
       <div class="stats">
         <div class="stat">
-          <span class="stat-label">Price</span>
+          <span class="stat-label">Price <span class="rank" data-field="price-rank" hidden></span></span>
           <span class="stat-line"><span class="stat-value" data-field="price"></span><span class="delta" data-field="price-delta"></span></span>
         </div>
         <div class="stat">
@@ -385,10 +410,13 @@
   const $ = (id) => document.getElementById(id);
   const REFRESH_MS = 60_000;
   const WATCH_KEY = "subnet-viewer:watchlist";
+  const SORT_KEY = "subnet-viewer:sort";
 
   const grid = $("grid");
   const cards = new Map(); // netuid -> card
-  let subnetNames = new Map(); // netuid -> name
+  let subnetInfo = new Map(); // netuid -> {name, symbol, price_tao, price_rank}
+  let rankedCount = 0; // how many subnets have a price rank, for "#3 of 128"
+  let sortBy = loadSort(); // "netuid" or "price"
   let watch = loadWatch(); // newest first
   let selected = Number(new URLSearchParams(location.search).get("netuid")) || null;
   if (!selected && watch.length === 0) selected = 1;
@@ -406,6 +434,14 @@
     try {
       localStorage.setItem(WATCH_KEY, JSON.stringify(watch));
     } catch { /* storage blocked */ }
+  }
+
+  function loadSort() {
+    try {
+      return localStorage.getItem(SORT_KEY) === "price" ? "price" : "netuid";
+    } catch {
+      return "netuid";
+    }
   }
 
   function num(v) {
@@ -439,7 +475,21 @@
   const sym = (s) => `\u2068${s || ""}\u2069`;
   const kNum = (v) => kTao(v).replace(/ τ$/, ""); // kTao without the unit, for "1.94k / 1.52k τ"
   const shortKey = (key) => `${key.slice(0, 6)}…${key.slice(-5)}`;
-  const subnetLabel = (netuid) => `SN${netuid}${subnetNames.get(netuid) ? ` · ${subnetNames.get(netuid)}` : ""}`;
+  const subnetLabel = (netuid) => {
+    const name = subnetInfo.get(netuid)?.name;
+    return `SN${netuid}${name ? ` · ${name}` : ""}`;
+  };
+  const priceRank = (netuid) => subnetInfo.get(netuid)?.price_rank ?? null;
+  // By netuid, or by price rank with the dearest alpha first. Subnets the chain
+  // gave no price for sort last, by netuid among themselves.
+  function compareSubnets(a, b) {
+    if (sortBy !== "price") return a - b;
+    const [rankA, rankB] = [priceRank(a), priceRank(b)];
+    if (rankA === null && rankB === null) return a - b;
+    if (rankA === null) return 1;
+    if (rankB === null) return -1;
+    return rankA - rankB;
+  }
 
   async function getJSON(url, options) {
     const res = await fetch(url, options);
@@ -620,6 +670,7 @@
 
     f("price").textContent = tao(d.alpha_price.tao);
     setDelta(f("price-delta"), d.alpha_price, true);
+    showPriceRank(card);
     f("fee").textContent = tao(d.registration_fee.tao);
     setDelta(f("fee-delta"), d.registration_fee, null);
 
@@ -677,8 +728,17 @@
       ? "No miners earned emission last epoch, apart from the owner's own hotkeys"
       : "This subnet isn't receiving any emission right now";
 
-    $("updated").textContent = `Updated ${new Date().toLocaleTimeString()}`;
     fitStats(card);
+  }
+
+  // Where this subnet's price ranks among all subnets, from the subnet list.
+  function showPriceRank(card) {
+    const rank = priceRank(card.netuid);
+    const el = card.field("price-rank");
+    el.hidden = rank === null;
+    if (rank === null) return;
+    el.textContent = `#${rank}`;
+    el.title = `Price rank ${rank} of ${rankedCount} subnets (#1 has the dearest alpha)`;
   }
 
   // Shrink a stat value that doesn't fit its group (e.g. τ0.0005623 on a narrow phone).
@@ -756,20 +816,32 @@
     layout();
   }
 
+  let pickerShows = ""; // what the picker already lists, so it isn't rebuilt under the mouse
   function updatePicker() {
-    const ids = new Set([...subnetNames.keys(), ...watch]);
+    const ids = new Set([...subnetInfo.keys(), ...watch]);
     if (selected) ids.add(selected);
-    const options = [...ids]
-      .sort((a, b) => a - b)
-      .map((n) => new Option(`${watch.includes(n) ? "★ " : ""}${subnetLabel(n)}`, n));
-    $("netuid").replaceChildren(new Option("Choose a subnet…", ""), ...options);
+    const labels = [...ids].sort(compareSubnets).map((n) => {
+      const rank = priceRank(n);
+      const rankTag = sortBy === "price" && rank !== null ? `#${rank} · ` : "";
+      return [n, `${watch.includes(n) ? "★ " : ""}${rankTag}${subnetLabel(n)}`];
+    });
+    const shows = `${selected}|${labels.map(([n, label]) => `${n}:${label}`).join("|")}`;
+    if (shows === pickerShows) return;
+    pickerShows = shows;
+    $("netuid").replaceChildren(
+      new Option("Choose a subnet…", ""),
+      ...labels.map(([n, label]) => new Option(label, n)),
+    );
     $("netuid").value = selected ? String(selected) : "";
   }
 
   async function loadSubnetList() {
     try {
       const subnets = await getJSON("/api/subnets");
-      subnetNames = new Map(subnets.map((s) => [s.netuid, s.name]));
+      subnetInfo = new Map(subnets.map((s) => [s.netuid, s]));
+      rankedCount = subnets.filter((s) => s.price_rank !== null).length;
+      $("error").hidden = true;
+      cards.forEach(showPriceRank); // ranks move as prices do
     } catch (e) {
       $("error").textContent = `Couldn't load the subnet list: ${e.message}`;
       $("error").hidden = false;
@@ -789,9 +861,54 @@
       card.el.classList.add("flash");
     }
   });
-  const refreshAll = () => cards.forEach(load);
-  $("refresh").addEventListener("click", refreshAll);
-  setInterval(() => document.visibilityState === "visible" && refreshAll(), REFRESH_MS);
+  // The ring fills as the next update approaches, and spins while one runs.
+  const RING = 2 * Math.PI * 9; // the <circle r="9"> all the way round
+  let nextRefreshAt = Date.now() + REFRESH_MS;
+  let refreshing = false;
+  $("tick").querySelector(".ring").style.strokeDasharray = RING;
+
+  function drawRing() {
+    const left = Math.max(0, nextRefreshAt - Date.now());
+    const filled = refreshing ? 0.25 : 1 - left / REFRESH_MS; // a quarter arc, spinning, while it loads
+    $("tick").classList.toggle("busy", refreshing);
+    $("tick").querySelector(".ring").style.strokeDashoffset = RING * (1 - filled);
+    const label = refreshing ? "Updating…" : `Next update in ${Math.ceil(left / 1000)}s. Click to update now`;
+    $("tick").title = label;
+    $("tick").setAttribute("aria-label", label);
+  }
+
+  async function refreshAll() {
+    if (refreshing) return;
+    refreshing = true;
+    nextRefreshAt = Date.now() + REFRESH_MS;
+    drawRing();
+    try {
+      await Promise.all([...[...cards.values()].map(load), loadSubnetList()]);
+    } finally {
+      refreshing = false;
+      drawRing();
+    }
+  }
+
+  $("tick").addEventListener("click", refreshAll);
+  setInterval(() => {
+    if (document.visibilityState !== "visible") return; // paused in a background tab
+    if (Date.now() >= nextRefreshAt) refreshAll();
+    else drawRing();
+  }, 1000);
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "visible" && Date.now() >= nextRefreshAt) refreshAll();
+  });
+  drawRing();
+
+  $("sort").value = sortBy;
+  $("sort").addEventListener("change", (e) => {
+    sortBy = e.target.value === "price" ? "price" : "netuid";
+    try {
+      localStorage.setItem(SORT_KEY, sortBy);
+    } catch { /* storage blocked: the choice lasts this visit */ }
+    updatePicker();
+  });
 
   // Theme: Auto follows the device; Light/Dark are saved in this browser.
   const THEME_KEY = "subnet-viewer:theme";

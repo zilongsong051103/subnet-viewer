@@ -39,7 +39,7 @@ BLOCKS_PER_DAY = 7200  # 12 s blocks
 RAO_PER_UNIT = 1_000_000_000
 FIXED_ONE = 1 << 32  # MinerBurned is a U96F32 fixed-point fraction: 2**32 == 100%
 SUMMARY_TTL = 30  # seconds; the chain only changes every 12 s anyway
-SUBNET_LIST_TTL = 600
+SUBNET_LIST_TTL = 120  # the list carries prices now, so keep it fairly fresh
 OPTIONAL_READ_TIMEOUT = 20  # archive reads can be slow; don't hold the page hostage
 TOP_MINERS = 5
 STATIC_DIR = Path(__file__).parent / "static"
@@ -271,12 +271,27 @@ async def subnet_summary(client, netuid: int) -> dict:
 
 
 async def subnet_list(client) -> list[dict]:
-    infos = await client.runtime(SubnetInfoRuntimeApi.get_all_dynamic_info, [])
-    return [
-        {"netuid": info["netuid"], "name": text(info["subnet_name"]), "symbol": text(info["token_symbol"])}
+    """Every subnet with its spot price, ranked: rank 1 holds the dearest alpha."""
+    head = await client.at()
+    infos, prices = await asyncio.gather(
+        head.runtime(SubnetInfoRuntimeApi.get_all_dynamic_info, []),
+        head.prices.alpha_prices(),  # same spot price a card shows, for every subnet at once
+    )
+    subnets = [
+        {
+            "netuid": info["netuid"],
+            "name": text(info["subnet_name"]),
+            "symbol": text(info["token_symbol"]),
+            "price_tao": prices.get(info["netuid"]),
+            "price_rank": None,  # filled in below; stays None when the chain has no price
+        }
         for info in infos
         if info and info["netuid"] != 0  # root has no alpha or miners
     ]
+    priced = [s for s in subnets if s["price_tao"] is not None]
+    for rank, subnet in enumerate(sorted(priced, key=lambda s: s["price_tao"], reverse=True), start=1):
+        subnet["price_rank"] = rank
+    return subnets
 
 
 def chain_error(e: Exception) -> HTTPException:

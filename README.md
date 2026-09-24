@@ -4,13 +4,15 @@ A small web dashboard for keeping an eye on a watch list of Bittensor subnets. E
 
 For each subnet card:
 
-- **Price** and **registration fee**, each with its change over the last 24h
+- **Price** and **registration fee**, each with its change over the last 24h, plus where the price ranks among all subnets (#1 is the dearest alpha)
 - **Burn**: share of miner emission burned via the owner's hotkeys, with total miner emission per day
 - **Owner**: total balance / locked stake, linking to the owner's Taostats page
 - **Top 5 miners**: share of daily emission and daily TAO, with a 🛡 badge on immune miners
 - Subnet logo, website and GitHub links from the subnet's on-chain identity, and a 🛡 badge while the subnet itself is immune
 
-Visitors build their own watch list (★), reorder cards by dragging, and pick a light or dark theme. These settings are saved in the browser.
+Visitors build their own watch list (★), reorder cards by dragging, sort the subnet list by netuid or price rank, and pick a light or dark theme. These settings are saved in the browser.
+
+The cards update by themselves every 60 seconds. The ring in the header fills as the next update approaches, spins while one runs, and updates now when clicked. It pauses while the tab is in the background.
 
 ## Run it
 
@@ -43,7 +45,7 @@ If the app is reachable beyond your own machine, put it behind HTTPS (for exampl
 
 ## API
 
-- `GET /api/subnets`: netuid, name and symbol of every subnet
+- `GET /api/subnets`: netuid, name, symbol, alpha price and price rank of every subnet (cached for 2 minutes)
 - `GET /api/subnets/{netuid}`: everything shown on one card (cached for 30 seconds)
 - `GET /api/seed-lab/session`: whether Seed Lab is turned on, and whether this browser is logged in
 - `POST /api/seed-lab/login` with `{"password": "…"}`: logs in (sets a session cookie); `POST /api/seed-lab/logout` logs out
