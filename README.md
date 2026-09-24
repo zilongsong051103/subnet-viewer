@@ -1,4 +1,4 @@
-# Subnet viewer
+# Subnet Viewer
 
 A small web dashboard for keeping an eye on a watch list of Bittensor subnets. Every number is read live from the chain; there is no database.
 

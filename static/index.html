@@ -3,7 +3,9 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Subnet viewer</title>
+<title>Subnet Viewer</title>
+<link rel="icon" href="/logo.jpg">
+<link rel="apple-touch-icon" href="/logo.jpg">
 <script>
   // Apply a saved Light/Dark choice before first paint so reloads don't flash.
   try {
@@ -81,7 +83,9 @@
     display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between;
     gap: 8px 24px; margin-bottom: 16px;
   }
-  h1 { font-size: 16px; font-weight: 600; margin: 0; }
+  /* flex keeps the logo centred against the title whatever size they are */
+  h1 { display: flex; align-items: center; gap: 8px; font-size: 21px; font-weight: 600; margin: 0; }
+  .brand { flex: none; width: 30px; height: 30px; border-radius: 6px; }
   .picker { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
   .picker label, .hint { color: var(--ink-2); }
   /* Ring counting down to the next update; click it to update now. */
@@ -99,7 +103,7 @@
   .tick.busy svg { animation: spin 0.9s linear infinite; }
   @keyframes spin { to { transform: rotate(1turn); } }
   @media (prefers-reduced-motion: reduce) { .tick.busy svg { animation-duration: 2.4s; } }
-  .navlink { margin-left: 8px; font-size: 13px; font-weight: 400; color: var(--accent); text-decoration: none; white-space: nowrap; }
+  .navlink { font-size: 14px; font-weight: 400; color: var(--accent); text-decoration: none; white-space: nowrap; }
   .navlink:hover { text-decoration: underline; }
   /* Seed Lab password box, shown over the dashboard before going there. */
   .login {
@@ -283,7 +287,7 @@
 <template id="shield-template"><svg class="shield" aria-hidden="true"><use href="#shield"/></svg></template>
 <main>
   <header class="top">
-    <h1>Subnet viewer <a class="navlink" id="seed-lab-link" href="/seed-lab">Seed Lab →</a></h1>
+    <h1><img class="brand" src="/logo.jpg" alt=""> Subnet Viewer <a class="navlink" id="seed-lab-link" href="/seed-lab">Seed Lab →</a></h1>
     <div class="picker">
       <label for="netuid" class="visually-hidden">Subnet</label>
       <select id="netuid"><option value="">Loading…</option></select>

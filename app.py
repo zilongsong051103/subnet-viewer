@@ -1,4 +1,4 @@
-"""Subnet viewer: a small web app showing live stats for a Bittensor subnet.
+"""Subnet Viewer: a small web app showing live stats for a Bittensor subnet.
 
 For one subnet it reports:
   * alpha price and registration fee, each with the change over ~24h. The old
@@ -65,7 +65,7 @@ async def lifespan(app: FastAPI):
         yield
 
 
-app = FastAPI(title="Subnet viewer", lifespan=lifespan)
+app = FastAPI(title="Subnet Viewer", lifespan=lifespan)
 
 
 def text(raw) -> str:
@@ -448,6 +448,12 @@ async def seed_lab_page(request: Request):
         return RedirectResponse("/?login=seed-lab", status_code=303)
     # no-store: otherwise browsers may reshow a cached copy without asking the server, skipping the login.
     return FileResponse(STATIC_DIR / "seed-lab.html", headers={"Cache-Control": "no-store"})
+
+
+@app.get("/logo.jpg", include_in_schema=False)
+async def logo():
+    # Served by name: there is no static mount, which is what keeps seed-lab.html behind the login.
+    return FileResponse(STATIC_DIR / "logo.jpg")
 
 
 @app.get("/", include_in_schema=False)
