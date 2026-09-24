@@ -85,6 +85,25 @@
   .picker { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
   .picker label, .updated, .hint { color: var(--ink-2); }
   .updated { font-size: 13px; }
+  .navlink { margin-left: 8px; font-size: 13px; font-weight: 400; color: var(--accent); text-decoration: none; white-space: nowrap; }
+  .navlink:hover { text-decoration: underline; }
+  /* Seed Lab password box, shown over the dashboard before going there. */
+  .login {
+    width: min(360px, calc(100vw - 32px)); padding: 18px; color: var(--ink);
+    background: var(--surface); border: 1px solid var(--border); border-radius: 12px;
+  }
+  .login::backdrop { background: rgba(0, 0, 0, 0.45); }
+  .login h2 { margin: 0 0 6px; font-size: 16px; font-weight: 600; }
+  .login p { margin: 0 0 12px; color: var(--ink-2); }
+  .login input {
+    width: 100%; font: inherit; color: var(--ink); background: var(--page);
+    border: 1px solid var(--rule); border-radius: 8px; padding: 8px 10px;
+  }
+  .login .login-error { margin: 8px 0 0; color: var(--bad); }
+  .login-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 16px; }
+  .login-actions .primary { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600; }
+  .login-actions .primary:hover { filter: brightness(1.05); }
+  .login-actions button:disabled { opacity: 0.6; cursor: default; }
   .theme { display: inline-flex; border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
   .theme button { border: 0; border-radius: 0; padding: 6px 10px; color: var(--ink-2); }
   .theme button + button { border-left: 1px solid var(--border); }
@@ -248,7 +267,7 @@
 <template id="shield-template"><svg class="shield" aria-hidden="true"><use href="#shield"/></svg></template>
 <main>
   <header class="top">
-    <h1>Subnet viewer</h1>
+    <h1>Subnet viewer <a class="navlink" id="seed-lab-link" href="/seed-lab">Seed Lab →</a></h1>
     <div class="picker">
       <label for="netuid" class="visually-hidden">Subnet</label>
       <select id="netuid"><option value="">Loading…</option></select>
@@ -266,6 +285,23 @@
   <p id="hint" class="hint" hidden>Choose a subnet, then click ☆ Watch on its card to add it to your watch list.</p>
   <div id="grid" class="grid" aria-live="polite"></div>
 </main>
+
+<dialog id="login" class="login" aria-labelledby="login-title">
+  <form id="login-form">
+    <h2 id="login-title">Seed Lab</h2>
+    <div id="login-fields">
+      <p>Enter the Seed Lab password to continue.</p>
+      <label for="login-password" class="visually-hidden">Password</label>
+      <input type="password" id="login-password" autocomplete="current-password" placeholder="Password" required autofocus>
+      <p id="login-error" class="login-error" role="alert" hidden></p>
+    </div>
+    <p id="login-disabled" hidden>Seed Lab is turned off on this server.</p>
+    <div class="login-actions">
+      <button type="button" id="login-cancel">Cancel</button>
+      <button type="submit" id="login-submit" class="primary">Open Seed Lab</button>
+    </div>
+  </form>
+</dialog>
 
 <template id="card-template">
   <article class="card">
@@ -405,8 +441,8 @@
   const shortKey = (key) => `${key.slice(0, 6)}…${key.slice(-5)}`;
   const subnetLabel = (netuid) => `SN${netuid}${subnetNames.get(netuid) ? ` · ${subnetNames.get(netuid)}` : ""}`;
 
-  async function getJSON(url) {
-    const res = await fetch(url);
+  async function getJSON(url, options) {
+    const res = await fetch(url, options);
     const body = await res.json().catch(() => ({}));
     if (res.ok) return body;
     // FastAPI sends a string for our errors and a list of issues for invalid input.
@@ -778,6 +814,54 @@
       } catch { /* storage blocked: the choice lasts this visit */ }
       applyTheme(themeChoice);
     }));
+
+  // Seed Lab needs a password: ask for it here, before leaving the dashboard.
+  const loginDialog = $("login");
+  async function openSeedLab() {
+    let session = { enabled: true, logged_in: false };
+    try {
+      session = await getJSON("/api/seed-lab/session");
+    } catch { /* show the box anyway; logging in reports any problem */ }
+    if (session.logged_in) return location.assign("/seed-lab");
+    $("login-fields").hidden = !session.enabled;
+    $("login-disabled").hidden = session.enabled;
+    $("login-submit").hidden = !session.enabled;
+    $("login-cancel").textContent = session.enabled ? "Cancel" : "Close";
+    $("login-error").hidden = true;
+    $("login-password").value = "";
+    loginDialog.showModal();
+  }
+  $("seed-lab-link").addEventListener("click", (e) => {
+    if (e.button !== 0 || e.ctrlKey || e.metaKey || e.shiftKey || e.altKey) return; // new tab: /seed-lab sends it back here
+    e.preventDefault();
+    openSeedLab();
+  });
+  $("login-cancel").addEventListener("click", () => loginDialog.close());
+  $("login-form").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const submit = $("login-submit");
+    submit.disabled = true;
+    try {
+      await getJSON("/api/seed-lab/login", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ password: $("login-password").value }),
+      });
+      location.assign("/seed-lab");
+    } catch (err) {
+      submit.disabled = false;
+      $("login-error").textContent = err.message;
+      $("login-error").hidden = false;
+      $("login-password").select();
+    }
+  });
+  // /seed-lab sends visitors who aren't logged in here, with ?login=seed-lab.
+  const pageUrl = new URL(location.href);
+  if (pageUrl.searchParams.get("login") === "seed-lab") {
+    pageUrl.searchParams.delete("login");
+    history.replaceState(null, "", pageUrl);
+    openSeedLab();
+  }
 
   layout();
   loadSubnetList();

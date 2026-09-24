@@ -29,11 +29,25 @@ Then open http://127.0.0.1:8000.
 | `HOST` | `127.0.0.1` | Address to listen on (`0.0.0.0` for all interfaces) |
 | `PORT` | `8000` | Port to listen on |
 | `BT_NETWORK` | `finney` | Bittensor network name or `wss://` endpoint |
+| `SEED_LAB_PASSWORD` | (unset) | Password for Seed Lab. While unset, Seed Lab is switched off |
+
+## Access
+
+The dashboard and its API are public. Seed Lab (`/seed-lab` and its API) needs a password. Clicking **Seed Lab →** on the dashboard asks for it first, and opening `/seed-lab` directly without logging in sends you back to that password box. A login lasts 12 hours, or until **Log out** or a server restart. To turn Seed Lab on:
+
+```bash
+SEED_LAB_PASSWORD='a long random password' .venv/bin/python app.py
+```
+
+If the app is reachable beyond your own machine, put it behind HTTPS (for example a reverse proxy). Otherwise anyone on the network path can read the password and the login cookie.
 
 ## API
 
 - `GET /api/subnets`: netuid, name and symbol of every subnet
 - `GET /api/subnets/{netuid}`: everything shown on one card (cached for 30 seconds)
+- `GET /api/seed-lab/session`: whether Seed Lab is turned on, and whether this browser is logged in
+- `POST /api/seed-lab/login` with `{"password": "…"}`: logs in (sets a session cookie); `POST /api/seed-lab/logout` logs out
+- `POST /api/seed-lab/hunt` (login required): generates `count` random wallets (1–100) and checks their balances on the chain
 
 ## How the numbers are calculated
 

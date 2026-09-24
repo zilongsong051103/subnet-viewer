@@ -14,8 +14,11 @@ Run:  .venv/bin/python app.py      (then open http://127.0.0.1:8000)
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import hmac
 import os
 import re
+import secrets
 import statistics
 import time
 from contextlib import asynccontextmanager
@@ -23,11 +26,13 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 import bittensor as bt
+from bittensor import sp_core
 from bittensor._generated import storage
 from bittensor._generated.runtime_apis import SubnetInfoRuntimeApi
-from fastapi import FastAPI, HTTPException
+from fastapi import Depends, FastAPI, HTTPException, Request, Response
 from fastapi import Path as PathParam
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, RedirectResponse
+from pydantic import BaseModel, Field
 
 NETWORK = os.environ.get("BT_NETWORK", "finney")
 BLOCKS_PER_DAY = 7200  # 12 s blocks
@@ -294,6 +299,140 @@ async def get_subnet(netuid: int = PathParam(ge=1, le=65535)):
         raise
     except Exception as e:
         raise chain_error(e) from e
+
+
+# --- Seed Lab: an educational brute-force demo -------------------------------
+#
+# It generates REAL Bittensor wallets from random 12-word seed phrases, then asks
+# the chain whether each one holds anything (free TAO or staked value). It never
+# will: a 12-word seed has 2**128 possibilities, so stumbling onto a funded
+# wallet is impossible in practice. The point is to let students watch the
+# "funded wallets found" counter stay at zero forever.
+
+Keypair = sp_core.Keypair
+HUNT_MAX_COUNT = 100  # each request also makes 2 batched chain reads; keep it bounded
+
+# The dashboard is public; Seed Lab (page and API) needs a login. The password
+# box is on the dashboard: a correct password sets a signed session cookie. With
+# no password set, Seed Lab is switched off rather than left open.
+SEED_LAB_PASSWORD = os.environ.get("SEED_LAB_PASSWORD", "")
+SEED_LAB_DISABLED = "Seed Lab is turned off on this server (SEED_LAB_PASSWORD is not set)"
+SESSION_COOKIE = "seed_lab_session"
+SESSION_TTL = 12 * 3600
+# Signs session cookies. It is new on every start, so a restart logs everyone out.
+_session_key = secrets.token_bytes(32)
+
+
+def _sign(expires: int) -> str:
+    return hmac.new(_session_key, str(expires).encode(), hashlib.sha256).hexdigest()
+
+
+def seed_lab_logged_in(request: Request) -> bool:
+    expires, _, signature = request.cookies.get(SESSION_COOKIE, "").partition(".")
+    return (
+        bool(SEED_LAB_PASSWORD)
+        and expires.isdigit()
+        and int(expires) > time.time()
+        and hmac.compare_digest(signature, _sign(int(expires)))
+    )
+
+
+def require_seed_lab_login(request: Request) -> None:
+    if not SEED_LAB_PASSWORD:
+        raise HTTPException(503, SEED_LAB_DISABLED)
+    if not seed_lab_logged_in(request):
+        raise HTTPException(401, "Log in to Seed Lab first")
+
+
+class LoginRequest(BaseModel):
+    password: str = Field(max_length=1024)
+
+
+class HuntRequest(BaseModel):
+    count: int = Field(default=50, ge=1, le=HUNT_MAX_COUNT)
+
+
+def random_wallet() -> dict:
+    """A fresh, real wallet from a random seed: the phrase and the address."""
+    mnemonic = Keypair.generate_mnemonic()
+    keypair = Keypair.create_from_mnemonic(mnemonic)
+    return {"mnemonic": mnemonic, "ss58": keypair.ss58_address}
+
+
+def _tao(value) -> float:
+    return float(getattr(value, "tao", 0.0)) if value is not None else 0.0
+
+
+async def hunt_batch(client, count: int) -> dict:
+    """Make ``count`` random wallets and check each one's balance on-chain."""
+    wallets = await asyncio.to_thread(lambda: [random_wallet() for _ in range(count)])
+    addresses = [w["ss58"] for w in wallets]
+    head = await client.at()
+    balances, stakes = await asyncio.gather(
+        head.read("balances", coldkey_ss58s=addresses),
+        head.read("stake_value_for_coldkeys", coldkey_ss58s=addresses),
+    )
+
+    checked, hits = [], []
+    for wallet in wallets:
+        free = _tao(balances.get(wallet["ss58"]))
+        staked_valuation = stakes.get(wallet["ss58"])
+        staked = _tao(getattr(staked_valuation, "stake_value", None))
+        entry = {**wallet, "free_tao": free, "staked_tao": staked}
+        checked.append(entry)
+        if free > 0 or staked > 0:
+            hits.append(entry)
+
+    return {
+        "tried": count,
+        "block": head.block,
+        "samples": checked[:6],  # a handful for the live feed
+        "hits": hits,            # funded wallets: always empty in practice
+    }
+
+
+@app.post("/api/seed-lab/hunt", dependencies=[Depends(require_seed_lab_login)])
+async def seed_lab_hunt(req: HuntRequest):
+    try:
+        return await hunt_batch(app.state.client, req.count)
+    except Exception as e:
+        raise chain_error(e) from e
+
+
+@app.get("/api/seed-lab/session")
+async def seed_lab_session(request: Request):
+    return {"enabled": bool(SEED_LAB_PASSWORD), "logged_in": seed_lab_logged_in(request)}
+
+
+@app.post("/api/seed-lab/login", status_code=204)
+async def seed_lab_login(req: LoginRequest, request: Request, response: Response):
+    if not SEED_LAB_PASSWORD:
+        raise HTTPException(503, SEED_LAB_DISABLED)
+    if not secrets.compare_digest(req.password.encode(), SEED_LAB_PASSWORD.encode()):
+        raise HTTPException(401, "Wrong password")
+    expires = int(time.time()) + SESSION_TTL
+    response.set_cookie(
+        SESSION_COOKIE,
+        f"{expires}.{_sign(expires)}",
+        max_age=SESSION_TTL,
+        httponly=True,
+        samesite="lax",
+        secure=request.url.scheme == "https",
+    )
+
+
+@app.post("/api/seed-lab/logout", status_code=204)
+async def seed_lab_logout(response: Response):
+    response.delete_cookie(SESSION_COOKIE)
+
+
+@app.get("/seed-lab", include_in_schema=False)
+async def seed_lab_page(request: Request):
+    if not seed_lab_logged_in(request):
+        # The password box lives on the dashboard; send the visitor there with it open.
+        return RedirectResponse("/?login=seed-lab", status_code=303)
+    # no-store: otherwise browsers may reshow a cached copy without asking the server, skipping the login.
+    return FileResponse(STATIC_DIR / "seed-lab.html", headers={"Cache-Control": "no-store"})
 
 
 @app.get("/", include_in_schema=False)

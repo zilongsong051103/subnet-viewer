@@ -1,0 +1,436 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Seed Lab · Subnet viewer</title>
+<script>
+  // Apply a saved Light/Dark choice before first paint so reloads don't flash.
+  try {
+    const saved = localStorage.getItem("subnet-viewer:theme");
+    if (saved === "light" || saved === "dark") document.documentElement.dataset.theme = saved;
+  } catch { /* storage blocked: follow the device */ }
+</script>
+<style>
+  :root {
+    color-scheme: light;
+    --page: #f7f7f5;
+    --surface: #fcfcfb;
+    --ink: #2b2a27;
+    --ink-2: #6b6a64;
+    --hairline: #e6e5df;
+    --divider: #dddcd5;
+    --rule: #cfcec6;
+    --border: rgba(11, 11, 11, 0.08);
+    --good: #2e7d3a;
+    --good-soft: rgba(46, 125, 58, 0.14);
+    --bad: #c24d4a;
+    --accent: #3b7dd0;
+    --accent-soft: rgba(59, 125, 208, 0.12);
+    --hit: #b26a00;
+    --hit-soft: rgba(178, 106, 0, 0.16);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      color-scheme: dark;
+      --page: #111110;
+      --surface: #1b1b1a;
+      --ink: #e4e2dc;
+      --ink-2: #9a988f;
+      --hairline: #292927;
+      --divider: #353532;
+      --rule: #4d4c48;
+      --border: rgba(255, 255, 255, 0.07);
+      --good: #5da868;
+      --good-soft: rgba(93, 168, 104, 0.18);
+      --bad: #d27a74;
+      --accent: #6a9ad8;
+      --accent-soft: rgba(106, 154, 216, 0.16);
+      --hit: #e0a341;
+      --hit-soft: rgba(224, 163, 65, 0.18);
+    }
+  }
+  :root[data-theme="dark"] {
+    color-scheme: dark;
+    --page: #111110;
+    --surface: #1b1b1a;
+    --ink: #e4e2dc;
+    --ink-2: #9a988f;
+    --hairline: #292927;
+    --divider: #353532;
+    --rule: #4d4c48;
+    --border: rgba(255, 255, 255, 0.07);
+    --good: #5da868;
+    --good-soft: rgba(93, 168, 104, 0.18);
+    --bad: #d27a74;
+    --accent: #6a9ad8;
+    --accent-soft: rgba(106, 154, 216, 0.16);
+    --hit: #e0a341;
+    --hit-soft: rgba(224, 163, 65, 0.18);
+  }
+
+  * { box-sizing: border-box; }
+  [hidden] { display: none !important; }
+  body {
+    margin: 0;
+    background: var(--page);
+    color: var(--ink);
+    font: 15px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  main { max-width: 860px; margin: 0 auto; padding: 16px 16px 48px; }
+  a { color: var(--accent); }
+  code, .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+
+  .top {
+    display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between;
+    gap: 8px 24px; margin-bottom: 8px;
+  }
+  .top a.back { color: var(--ink-2); text-decoration: none; font-size: 14px; }
+  .top a.back:hover { color: var(--ink); }
+  h1 { font-size: 22px; font-weight: 600; margin: 12px 0 4px; }
+  .lede { color: var(--ink-2); margin: 0 0 20px; max-width: 64ch; }
+  h2 { font-size: 15px; font-weight: 600; margin: 0 0 12px; }
+  p { margin: 0 0 10px; }
+
+  .theme { display: inline-flex; border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
+  .theme button { border: 0; border-radius: 0; padding: 5px 9px; font: inherit; font-size: 13px; color: var(--ink-2); background: var(--surface); cursor: pointer; }
+  .theme button + button { border-left: 1px solid var(--border); }
+  .theme button[aria-pressed="true"] { background: var(--hairline); color: var(--ink); font-weight: 600; }
+  .top-actions { display: flex; align-items: center; gap: 8px; }
+  .logout { font: inherit; font-size: 13px; color: var(--ink-2); background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 5px 9px; cursor: pointer; }
+  .logout:hover { background: var(--hairline); color: var(--ink); }
+
+  .card { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 18px; margin-bottom: 16px; }
+
+  /* The headline counter */
+  .scoreboard { text-align: center; border-color: var(--border); }
+  .score-num { font-size: 44px; font-weight: 700; line-height: 1.1; font-variant-numeric: tabular-nums; }
+  .score-cap { color: var(--ink-2); font-size: 14px; margin-top: 2px; }
+  .scoreboard.hit { border-color: var(--hit); background: var(--hit-soft); }
+  .scoreboard.hit .score-num { color: var(--hit); }
+
+  button.btn {
+    font: inherit; color: var(--ink); background: var(--surface);
+    border: 1px solid var(--border); border-radius: 8px; padding: 9px 16px; cursor: pointer; font-weight: 600;
+  }
+  button.btn:hover { background: var(--hairline); }
+  button.btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  button.btn.primary:hover { filter: brightness(1.05); }
+  button:disabled { opacity: 0.5; cursor: default; }
+  :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .controls { display: flex; gap: 10px; justify-content: center; }
+
+  .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 14px 16px; }
+  .stat .label { font-size: 12px; color: var(--ink-2); }
+  .stat .value { font-size: 22px; font-weight: 600; font-variant-numeric: tabular-nums; }
+  .stat .value.small { font-size: 16px; }
+
+  table.feed { width: 100%; border-collapse: collapse; font-size: 13px; }
+  table.feed th, table.feed td { text-align: right; padding: 6px 8px; border-bottom: 1px solid var(--hairline); white-space: nowrap; }
+  table.feed th { font-weight: 400; color: var(--ink-2); font-size: 12px; }
+  table.feed td:first-child, table.feed th:first-child { text-align: left; }
+  table.feed .addr { font-family: ui-monospace, monospace; }
+  table.feed .zero { color: var(--ink-2); }
+  table.feed .tag { color: var(--ink-2); }
+  table.feed tr.funded td { background: var(--hit-soft); color: var(--hit); font-weight: 600; }
+  table.feed tr:last-child td { border-bottom: 0; }
+
+  .hitbox { border-left: 3px solid var(--hit); background: var(--hit-soft); border-radius: 8px; padding: 14px 16px; }
+  .hitbox .mono { overflow-wrap: anywhere; }
+
+  table.reality { width: 100%; border-collapse: collapse; font-size: 14px; }
+  table.reality th, table.reality td { text-align: left; padding: 7px 8px; border-bottom: 1px solid var(--hairline); }
+  table.reality th { font-weight: 400; color: var(--ink-2); font-size: 12px; }
+  table.reality td.num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+  table.reality tr:last-child td { border-bottom: 0; }
+
+  ul.takeaway { margin: 6px 0 0; padding-left: 20px; }
+  ul.takeaway li { margin-bottom: 8px; }
+  .fine { color: var(--ink-2); font-size: 13px; }
+  .scroll-x { overflow-x: auto; }
+</style>
+</head>
+<body>
+<main>
+  <header class="top">
+    <a class="back" href="/">← Subnet viewer</a>
+    <div class="top-actions">
+      <div class="theme" role="group" aria-label="Theme">
+        <button type="button" data-theme-choice="system" title="Follow your device setting">Auto</button>
+        <button type="button" data-theme-choice="light">Light</button>
+        <button type="button" data-theme-choice="dark">Dark</button>
+      </div>
+      <button type="button" class="logout" id="logout">Log out</button>
+    </div>
+  </header>
+
+  <h1>Seed Lab — can you stumble onto a funded wallet?</h1>
+  <p class="lede">
+    A Bittensor wallet is just a random 12-word <em>seed phrase</em>. This page
+    makes real ones — seed → wallet → address — and asks the live chain whether
+    each one holds anything (free TAO or staked value). If a wallet ever has a
+    balance, it gets flagged. Watch the counter. It stays at zero.
+  </p>
+
+  <!-- Headline counter -->
+  <div class="card scoreboard" id="scoreboard">
+    <div class="score-num" id="score">0</div>
+    <div class="score-cap">funded wallets found · <span id="score-checked">0</span> checked</div>
+    <div class="controls" style="margin-top:16px">
+      <button type="button" class="btn primary" id="start">Start hunting</button>
+      <button type="button" class="btn" id="reset">Reset</button>
+    </div>
+  </div>
+
+  <!-- Stats -->
+  <div class="card">
+    <div class="stats">
+      <div class="stat"><div class="label">Wallets checked</div><div class="value" id="s-tried">0</div></div>
+      <div class="stat"><div class="label">Checks / sec</div><div class="value" id="s-rate">0</div></div>
+      <div class="stat"><div class="label">Funded found</div><div class="value" id="s-hits">0</div></div>
+      <div class="stat"><div class="label">TAO found</div><div class="value small" id="s-tao">τ0</div></div>
+      <div class="stat"><div class="label">Elapsed</div><div class="value small" id="s-elapsed">0s</div></div>
+    </div>
+  </div>
+
+  <!-- Flag box: hidden unless a funded wallet turns up -->
+  <div class="card hitbox" id="hitbox" hidden>
+    <h2 style="color:var(--hit)">⚑ A funded wallet turned up!</h2>
+    <p>Against all odds a generated wallet holds a balance. (If you are really
+      seeing this, screenshot it — it should never happen.)</p>
+    <div id="hitlist"></div>
+  </div>
+
+  <!-- Live feed -->
+  <div class="card">
+    <h2>Live wallet feed</h2>
+    <p class="fine">Each row is a real wallet just created from a random seed, and its balance on the chain right now.</p>
+    <div class="scroll-x">
+      <table class="feed">
+        <thead>
+          <tr><th>Address</th><th>Free TAO</th><th>Staked (τ)</th><th>Holds?</th></tr>
+        </thead>
+        <tbody id="feed">
+          <tr><td class="tag" colspan="4">Press “Start hunting”.</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- The reality -->
+  <div class="card">
+    <h2>Why it never happens</h2>
+    <p>A 12-word seed is one of <strong>2<sup>128</sup></strong> ≈
+      <strong>3.4 × 10<sup>38</sup></strong> possibilities. Even if a
+      <strong>million</strong> wallets on the whole network held funds, the chance
+      that one random guess lands on any of them is about
+      <strong>1 in 3.4 × 10<sup>32</sup></strong>. Here is how long you would
+      expect to wait to hit <em>even one</em>:</p>
+    <div class="scroll-x">
+      <table class="reality">
+        <thead><tr><th>Checking speed</th><th class="num">Wallets / second</th><th class="num">Expected wait for one funded hit</th></tr></thead>
+        <tbody id="reality"></tbody>
+      </table>
+    </div>
+    <p class="fine" id="reality-note" style="margin-top:12px"></p>
+  </div>
+
+  <div class="card">
+    <h2>The takeaway</h2>
+    <ul class="takeaway">
+      <li><strong>Random guessing never works.</strong> The keyspace is so vast that every computer on Earth, running for the whole age of the universe, would still check essentially none of it.</li>
+      <li><strong>Addresses are public; that's fine.</strong> Security doesn't come from hiding the address — it comes from nobody being able to guess the seed behind it.</li>
+      <li><strong>So how are wallets actually lost?</strong> Never by guessing. Only when a seed phrase is leaked, phished, screenshotted, or stored somewhere insecure. Guard the 12 words; that's the whole game.</li>
+    </ul>
+  </div>
+
+  <p class="fine">Educational demo. Wallets are generated with the real Bittensor library and their balances read from the live chain; the seeds are thrown away. It cannot find anyone's funds — that's the point.</p>
+</main>
+
+<script>
+  const $ = (id) => document.getElementById(id);
+
+  // ---- number & time formatting -------------------------------------------
+  const fmtInt = (n) => Math.round(n).toLocaleString("en-US");
+  function fmtBig(n) {
+    if (n < 1e6) return Math.round(n).toLocaleString("en-US");
+    return n.toExponential(2).replace("e+", " × 10^");
+  }
+  const YEAR = 365.25 * 24 * 3600;
+  const UNIVERSE_YEARS = 1.38e10;
+  function fmtDuration(seconds) {
+    if (!isFinite(seconds)) return "∞";
+    if (seconds < 1) return "under a second";
+    if (seconds < 90) return `${Math.round(seconds)} seconds`;
+    if (seconds < 5400) return `${Math.round(seconds / 60)} minutes`;
+    if (seconds < 36 * 3600) return `${Math.round(seconds / 3600)} hours`;
+    if (seconds < 365 * 24 * 3600) return `${Math.round(seconds / 86400)} days`;
+    const years = seconds / YEAR;
+    if (years < 1e6) return `${fmtBig(years)} years`;
+    const universes = years / UNIVERSE_YEARS;
+    if (universes < 1) return `${fmtBig(years)} years`;
+    return `${fmtBig(universes)} × the age of the universe`;
+  }
+  const taoStr = (v) => (v >= 1 ? v.toLocaleString("en-US", { maximumFractionDigits: 2 }) : String(+v.toFixed(4)));
+
+  // ---- state ---------------------------------------------------------------
+  const state = { running: false, tried: 0, hits: 0, tao: 0, startedAt: 0, lastRate: 500 };
+  const BATCH = 50;
+
+  function liveRate() {
+    const secs = (performance.now() - state.startedAt) / 1000;
+    return secs > 0 ? state.tried / secs : 0;
+  }
+
+  // ---- reality table -------------------------------------------------------
+  const SEED_SPACE = Math.pow(2, 128);
+  const ASSUMED_FUNDED = 1e6;             // generous upper bound on funded accounts
+  const EXPECTED_DRAWS = SEED_SPACE / ASSUMED_FUNDED;  // ~3.4e32
+  let lastRealityRate = 0;
+  function renderReality() {
+    const rate = Math.max(1, Math.round(state.lastRate));
+    lastRealityRate = rate;
+    const rows = [
+      ["This page (reads the live chain)", rate],
+      ["A million checks per second", 1e6],
+      ["A billion checks per second", 1e9],
+      ["A trillion checks per second", 1e12],
+    ];
+    $("reality").innerHTML = rows.map(([label, r]) =>
+      `<tr><td>${label}</td><td class="num">${fmtBig(r)}</td><td class="num">${fmtDuration(EXPECTED_DRAWS / r)}</td></tr>`
+    ).join("");
+    $("reality-note").innerHTML =
+      "Even the fastest row is far longer than the universe has existed (~4 × 10<sup>17</sup> seconds). " +
+      "And a real attacker can't check a trillion balances a second — every check has to ask the chain.";
+  }
+
+  // ---- feed ----------------------------------------------------------------
+  const feedRows = [];
+  function pushFeed(samples) {
+    for (const w of samples) {
+      const funded = w.free_tao > 0 || w.staked_tao > 0;
+      feedRows.unshift(
+        `<tr${funded ? ' class="funded"' : ""}>` +
+        `<td class="addr">${w.ss58.slice(0, 8)}…${w.ss58.slice(-6)}</td>` +
+        `<td class="${w.free_tao ? "" : "zero"}">τ${taoStr(w.free_tao)}</td>` +
+        `<td class="${w.staked_tao ? "" : "zero"}">τ${taoStr(w.staked_tao)}</td>` +
+        `<td class="tag">${funded ? "⚑ yes" : "empty"}</td></tr>`
+      );
+    }
+    feedRows.length = Math.min(feedRows.length, 8);
+    $("feed").innerHTML = feedRows.join("");
+  }
+
+  // ---- the hunt loop -------------------------------------------------------
+  async function huntLoop() {
+    while (state.running) {
+      let data;
+      try {
+        const res = await fetch("/api/seed-lab/hunt", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ count: BATCH }),
+        });
+        if (res.status === 401) return location.assign("/?login=seed-lab"); // session ended: ask for the password again
+        if (!res.ok) throw new Error((await res.json().catch(() => ({}))).detail || `Error ${res.status}`);
+        data = await res.json();
+      } catch (e) {
+        stop();
+        $("score-cap").innerHTML = `<span style="color:var(--bad)">stopped: ${e.message}</span>`;
+        return;
+      }
+      if (!state.running) return;
+
+      state.tried += data.tried;
+      pushFeed(data.samples);
+      if (data.hits.length) recordHits(data.hits);
+      render();
+      await new Promise((r) => setTimeout(r, 0));
+    }
+  }
+
+  function recordHits(hits) {
+    state.hits += hits.length;
+    for (const h of hits) {
+      state.tao += h.free_tao + h.staked_tao;
+      $("hitlist").insertAdjacentHTML("beforeend",
+        `<p class="mono">${h.ss58}<br>free τ${taoStr(h.free_tao)} · staked τ${taoStr(h.staked_tao)}<br>seed: ${h.mnemonic}</p>`);
+    }
+    $("hitbox").hidden = false;
+    $("scoreboard").classList.add("hit");
+    render();
+  }
+
+  function render() {
+    const rate = liveRate();
+    if (rate > 0) state.lastRate = rate;
+    if (Math.round(state.lastRate) !== lastRealityRate) renderReality();
+    $("score").textContent = fmtInt(state.hits);
+    $("score-checked").textContent = fmtInt(state.tried);
+    $("s-tried").textContent = fmtInt(state.tried);
+    $("s-rate").textContent = fmtInt(rate);
+    $("s-hits").textContent = fmtInt(state.hits);
+    $("s-tao").textContent = `τ${taoStr(state.tao)}`;
+    $("s-elapsed").textContent = fmtDuration((performance.now() - state.startedAt) / 1000).replace(" seconds", "s");
+  }
+
+  function start() {
+    if (state.running) return;
+    state.running = true;
+    state.startedAt = performance.now() - (state.tried / Math.max(1, state.lastRate)) * 1000; // keep rate sane after resume
+    $("start").textContent = "Stop";
+    $("start").classList.remove("primary");
+    huntLoop();
+  }
+
+  function stop() {
+    state.running = false;
+    $("start").textContent = state.tried ? "Resume" : "Start hunting";
+    $("start").classList.add("primary");
+    render();
+  }
+
+  function reset() {
+    stop();
+    Object.assign(state, { tried: 0, hits: 0, tao: 0 });
+    feedRows.length = 0;
+    $("feed").innerHTML = '<tr><td class="tag" colspan="4">Press “Start hunting”.</td></tr>';
+    $("hitbox").hidden = true;
+    $("hitlist").innerHTML = "";
+    $("scoreboard").classList.remove("hit");
+    $("score-cap").innerHTML = 'funded wallets found · <span id="score-checked">0</span> checked';
+    $("start").textContent = "Start hunting";
+    render();
+  }
+
+  // ---- wiring --------------------------------------------------------------
+  $("start").addEventListener("click", () => (state.running ? stop() : start()));
+  $("reset").addEventListener("click", reset);
+  $("logout").addEventListener("click", async () => {
+    stop();
+    try { await fetch("/api/seed-lab/logout", { method: "POST" }); } catch {}
+    location.assign("/");
+  });
+
+  // ---- theme ---------------------------------------------------------------
+  const THEME_KEY = "subnet-viewer:theme";
+  function applyTheme(choice) {
+    if (choice === "light" || choice === "dark") document.documentElement.dataset.theme = choice;
+    else delete document.documentElement.dataset.theme;
+    document.querySelectorAll("[data-theme-choice]").forEach((b) =>
+      b.setAttribute("aria-pressed", String(b.dataset.themeChoice === choice)));
+  }
+  let themeChoice = "system";
+  try { themeChoice = localStorage.getItem(THEME_KEY) || "system"; } catch {}
+  applyTheme(themeChoice);
+  document.querySelectorAll("[data-theme-choice]").forEach((b) =>
+    b.addEventListener("click", () => {
+      themeChoice = b.dataset.themeChoice;
+      try { localStorage.setItem(THEME_KEY, themeChoice); } catch {}
+      applyTheme(themeChoice);
+    }));
+
+  renderReality();
+</script>
+</body>
+</html>
