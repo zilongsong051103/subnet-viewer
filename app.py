@@ -328,6 +328,9 @@ async def get_subnet(netuid: int = PathParam(ge=1, le=65535)):
 # will: a 12-word seed has 2**128 possibilities, so stumbling onto a funded
 # wallet is impossible in practice. The point is to let students watch the
 # "funded wallets found" counter stay at zero forever.
+#
+# Seed phrases never leave this function: an address is derived and the phrase is
+# dropped, so no response can hand anyone the keys to a wallet.
 
 Keypair = sp_core.Keypair
 HUNT_MAX_COUNT = 100  # each request also makes 2 batched chain reads; keep it bounded
@@ -372,11 +375,10 @@ class HuntRequest(BaseModel):
     count: int = Field(default=50, ge=1, le=HUNT_MAX_COUNT)
 
 
-def random_wallet() -> dict:
-    """A fresh, real wallet from a random seed: the phrase and the address."""
-    mnemonic = Keypair.generate_mnemonic()
-    keypair = Keypair.create_from_mnemonic(mnemonic)
-    return {"mnemonic": mnemonic, "ss58": keypair.ss58_address}
+def random_address() -> str:
+    """The address of a fresh wallet built from a random seed; the seed is discarded."""
+    keypair = Keypair.create_from_mnemonic(Keypair.generate_mnemonic())
+    return keypair.ss58_address
 
 
 def _tao(value) -> float:
@@ -385,8 +387,7 @@ def _tao(value) -> float:
 
 async def hunt_batch(client, count: int) -> dict:
     """Make ``count`` random wallets and check each one's balance on-chain."""
-    wallets = await asyncio.to_thread(lambda: [random_wallet() for _ in range(count)])
-    addresses = [w["ss58"] for w in wallets]
+    addresses = await asyncio.to_thread(lambda: [random_address() for _ in range(count)])
     head = await client.at()
     balances, stakes = await asyncio.gather(
         head.read("balances", coldkey_ss58s=addresses),
@@ -394,11 +395,10 @@ async def hunt_batch(client, count: int) -> dict:
     )
 
     checked, hits = [], []
-    for wallet in wallets:
-        free = _tao(balances.get(wallet["ss58"]))
-        staked_valuation = stakes.get(wallet["ss58"])
-        staked = _tao(getattr(staked_valuation, "stake_value", None))
-        entry = {**wallet, "free_tao": free, "staked_tao": staked}
+    for ss58 in addresses:
+        free = _tao(balances.get(ss58))
+        staked = _tao(getattr(stakes.get(ss58), "stake_value", None))
+        entry = {"ss58": ss58, "free_tao": free, "staked_tao": staked}
         checked.append(entry)
         if free > 0 or staked > 0:
             hits.append(entry)

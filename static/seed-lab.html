@@ -199,7 +199,9 @@
   <div class="card hitbox" id="hitbox" hidden>
     <h2 style="color:var(--hit)">⚑ A funded wallet turned up!</h2>
     <p>Against all odds a generated wallet holds a balance. (If you are really
-      seeing this, screenshot it — it should never happen.)</p>
+      seeing this, screenshot it — it should never happen.) Its seed phrase was
+      thrown away the moment the address was worked out, so only the address is
+      left.</p>
     <div id="hitlist"></div>
   </div>
 
@@ -356,7 +358,7 @@
     for (const h of hits) {
       state.tao += h.free_tao + h.staked_tao;
       $("hitlist").insertAdjacentHTML("beforeend",
-        `<p class="mono">${h.ss58}<br>free τ${taoStr(h.free_tao)} · staked τ${taoStr(h.staked_tao)}<br>seed: ${h.mnemonic}</p>`);
+        `<p class="mono">${h.ss58}<br>free τ${taoStr(h.free_tao)} · staked τ${taoStr(h.staked_tao)}</p>`);
     }
     $("hitbox").hidden = false;
     $("scoreboard").classList.add("hit");
