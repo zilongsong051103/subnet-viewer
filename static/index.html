@@ -29,6 +29,7 @@
     --good: #2e7d3a;
     --bad: #c24d4a;
     --accent: #3b7dd0;
+    --immune: #b26a00;
     --logo-bg: #ffffff;
   }
   /* Dark palette: when the device prefers dark (unless Light is chosen), or when Dark is chosen. */
@@ -48,6 +49,7 @@
       --good: #5da868;
       --bad: #d27a74;
       --accent: #6a9ad8;
+      --immune: #e0a341;
       --logo-bg: #dcdad3;
     }
   }
@@ -66,6 +68,7 @@
     --good: #5da868;
     --bad: #d27a74;
     --accent: #6a9ad8;
+    --immune: #e0a341;
     --logo-bg: #dcdad3;
   }
 
@@ -223,6 +226,9 @@
   tfoot td { border-top: 1px solid var(--hairline); padding-top: 8px; font-weight: 600; white-space: normal; }
   .muted { color: var(--ink-2); font-weight: 400; }
   .num { text-align: right; font-variant-numeric: tabular-nums; }
+  /* UID colour says whether a miner can be deregistered: green yes, brown while immune. */
+  .uid { font-weight: 600; color: var(--good); cursor: help; }
+  .uid.immune { color: var(--immune); }
   .hotkey {
     font: 13px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
     background: none; border: 0; border-radius: 4px; padding: 1px 3px; margin: -1px -3px; color: var(--ink-2);
@@ -284,7 +290,6 @@
           d="M12 2l8 3v6c0 5.5-3.4 9.7-8 11-4.6-1.3-8-5.5-8-11V5z"/>
   </symbol>
 </svg>
-<template id="shield-template"><svg class="shield" aria-hidden="true"><use href="#shield"/></svg></template>
 <main>
   <header class="top">
     <h1><img class="brand" src="/logo.jpg" alt=""> Subnet Viewer <a class="navlink" id="seed-lab-link" href="/seed-lab">Seed Lab →</a></h1>
@@ -389,8 +394,9 @@
         <table>
           <thead>
             <tr>
-              <th scope="col" class="num">UID</th>
+              <th scope="col" class="num" title="Green: can be deregistered. Brown: immune">UID</th>
               <th scope="col">Hotkey</th>
+              <th scope="col">Coldkey</th>
               <th scope="col" class="num" title="Share of the subnet's daily miner emission (the burned part counts toward the whole)">Share</th>
               <th scope="col" class="num">Daily TAO</th>
             </tr>
@@ -398,7 +404,7 @@
           <tbody data-field="miners"></tbody>
           <tfoot>
             <tr>
-              <td colspan="2" data-field="total-label"></td>
+              <td colspan="3" data-field="total-label"></td>
               <td class="num" data-field="total-share"></td>
               <td class="num" data-field="total-tao"></td>
             </tr>
@@ -554,20 +560,17 @@
       tr.append(td);
     };
 
-    const who = document.createDocumentFragment();
-    who.append(keyButton(miner.hotkey));
-    if (miner.immune_blocks_left > 0) {
-      const badge = document.createElement("span");
-      badge.className = "badge";
-      badge.append($("shield-template").content.firstElementChild.cloneNode(true));
-      badge.setAttribute("role", "img");
-      badge.title = `Immune miner: can't be deregistered for ${immunityLeft(miner.immune_blocks_left)}`;
-      badge.setAttribute("aria-label", badge.title);
-      who.append(badge);
-    }
+    const immune = miner.immune_blocks_left > 0;
+    cell(String(miner.uid), `num uid${immune ? " immune" : ""}`);
+    const uid = tr.firstElementChild;
+    // Colour alone would leave this out of reach for some readers, so say it in words too.
+    uid.title = immune
+      ? `Immune miner: can't be deregistered for ${immunityLeft(miner.immune_blocks_left)}`
+      : "Not immune: this miner can be deregistered";
+    uid.setAttribute("aria-label", `UID ${miner.uid}. ${uid.title}`);
 
-    cell(String(miner.uid), "num");
-    cell(who);
+    cell(keyButton(miner.hotkey));
+    cell(keyButton(miner.coldkey));
     cell(share(miner.daily_alpha, fullDailyAlpha), "num");
     cell(`τ${colNum(miner.daily_tao)}`, "num");
     return tr;
