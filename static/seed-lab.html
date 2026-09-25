@@ -110,6 +110,7 @@
   .score-cap { color: var(--ink-2); font-size: 14px; margin-top: 2px; }
   .scoreboard.hit { border-color: var(--hit); background: var(--hit-soft); }
   .scoreboard.hit .score-num { color: var(--hit); }
+  .score-error { margin: 6px 0 0; color: var(--bad); font-size: 14px; }
 
   button.btn {
     font: inherit; color: var(--ink); background: var(--surface);
@@ -178,6 +179,7 @@
   <div class="card scoreboard" id="scoreboard">
     <div class="score-num" id="score">0</div>
     <div class="score-cap">funded wallets found · <span id="score-checked">0</span> checked</div>
+    <p class="score-error" id="error" role="alert" hidden></p>
     <div class="controls" style="margin-top:16px">
       <button type="button" class="btn primary" id="start">Start hunting</button>
       <button type="button" class="btn" id="reset">Reset</button>
@@ -340,7 +342,7 @@
         data = await res.json();
       } catch (e) {
         stop();
-        $("score-cap").innerHTML = `<span style="color:var(--bad)">stopped: ${e.message}</span>`;
+        showError(`Stopped: ${e.message}`);
         return;
       }
       if (!state.running) return;
@@ -351,6 +353,11 @@
       render();
       await new Promise((r) => setTimeout(r, 0));
     }
+  }
+
+  function showError(message) {
+    $("error").textContent = message; // textContent, not innerHTML: the text comes from the server
+    $("error").hidden = false;
   }
 
   function recordHits(hits) {
@@ -380,6 +387,7 @@
 
   function start() {
     if (state.running) return;
+    $("error").hidden = true;
     state.running = true;
     state.startedAt = performance.now() - (state.tried / Math.max(1, state.lastRate)) * 1000; // keep rate sane after resume
     $("start").textContent = "Stop";
@@ -402,7 +410,7 @@
     $("hitbox").hidden = true;
     $("hitlist").innerHTML = "";
     $("scoreboard").classList.remove("hit");
-    $("score-cap").innerHTML = 'funded wallets found · <span id="score-checked">0</span> checked';
+    $("error").hidden = true;
     $("start").textContent = "Start hunting";
     render();
   }
