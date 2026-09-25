@@ -201,7 +201,7 @@
 
   /* Price, reg fee and burn: three equal groups, each marked by a bar on its left. */
   .stats {
-    display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px;
+    display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px;
     margin-block: 0 16px; padding-block: 14px 0;
   }
   .stat { display: flex; flex-direction: column; min-width: 0; padding-left: 10px; border-left: 3px solid var(--rule); }
@@ -273,8 +273,8 @@
     .bar::after { content: ""; order: 98; flex-basis: 100%; }
     .owner-chip { order: 99; margin: 4px 0 0 auto; padding: 2px 7px; font-size: 11px; }
     th, td { padding-inline: 3px; }
-    /* Price and reg fee values can be long (τ0.001275); burn never exceeds "100.0%". */
-    .stats { gap: 8px; grid-template-columns: minmax(0, 1.1fr) minmax(0, 1.1fr) minmax(0, 0.8fr); }
+    /* Four groups don't fit a phone's width, so they wrap to two by two. */
+    .stats { gap: 8px 10px; grid-template-columns: repeat(2, minmax(0, 1fr)); row-gap: 12px; }
     .stat { padding-left: 8px; }
     .stat-value { font-size: 16px; }
   }
@@ -388,6 +388,10 @@
         <div class="stat" data-field="burn-stat">
           <span class="stat-label">Burn</span>
           <span class="stat-line"><span class="stat-value" data-field="burn"></span><span class="delta" data-field="burn-full"></span></span>
+        </div>
+        <div class="stat" data-field="emission-stat">
+          <span class="stat-label">Emission</span>
+          <span class="stat-line"><span class="stat-value" data-field="emission"></span><span class="delta" data-field="emission-day"></span></span>
         </div>
       </div>
       <div class="table-wrap" data-field="table">
@@ -677,7 +681,7 @@
 
     f("price").textContent = tao(d.alpha_price.tao);
     setDelta(f("price-delta"), d.alpha_price, true);
-    showPriceRank(card);
+    showListStats(card);
     f("fee").textContent = tao(d.registration_fee.tao);
     setDelta(f("fee-delta"), d.registration_fee, null);
 
@@ -738,14 +742,25 @@
     fitStats(card);
   }
 
-  // Where this subnet's price ranks among all subnets, from the subnet list.
-  function showPriceRank(card) {
-    const rank = priceRank(card.netuid);
-    const el = card.field("price-rank");
-    el.hidden = rank === null;
-    if (rank === null) return;
-    el.textContent = `#${rank}`;
-    el.title = `Price rank ${rank} of ${rankedCount} subnets (#1 has the dearest alpha)`;
+  // Figures that come from the subnet list rather than the card's own request:
+  // where its price ranks, and its share of the TAO the chain emits to subnets.
+  function showListStats(card) {
+    const info = subnetInfo.get(card.netuid);
+    const rank = info?.price_rank ?? null;
+    const rankEl = card.field("price-rank");
+    rankEl.hidden = rank === null;
+    if (rank !== null) {
+      rankEl.textContent = `#${rank}`;
+      rankEl.title = `Price rank ${rank} of ${rankedCount} subnets (#1 has the dearest alpha)`;
+    }
+
+    const pct = info?.emission_pct ?? null;
+    card.field("emission").textContent = pct === null ? "—" : `${pct.toFixed(2)}%`;
+    card.field("emission-day").textContent = pct === null ? "" : `(${tao(info.emission_tao_per_day)}/d)`;
+    card.field("emission-stat").title = pct === null
+      ? "The chain isn't emitting to this subnet right now"
+      : `Share of the TAO the chain emits to subnets: ${pct.toFixed(2)}%\n` +
+        `In brackets: what that comes to per day (${tao(info.emission_tao_per_day)}).`;
   }
 
   // Shrink a stat value that doesn't fit its group (e.g. τ0.0005623 on a narrow phone).
@@ -848,7 +863,7 @@
       subnetInfo = new Map(subnets.map((s) => [s.netuid, s]));
       rankedCount = subnets.filter((s) => s.price_rank !== null).length;
       $("error").hidden = true;
-      cards.forEach(showPriceRank); // ranks move as prices do
+      cards.forEach(showListStats); // ranks and emission shares move over time
     } catch (e) {
       $("error").textContent = `Couldn't load the subnet list: ${e.message}`;
       $("error").hidden = false;

@@ -271,12 +271,16 @@ async def subnet_summary(client, netuid: int) -> dict:
 
 
 async def subnet_list(client) -> list[dict]:
-    """Every subnet with its spot price, ranked: rank 1 holds the dearest alpha."""
+    """Every subnet with its spot price, price rank and share of TAO emission."""
     head = await client.at()
     infos, prices = await asyncio.gather(
         head.runtime(SubnetInfoRuntimeApi.get_all_dynamic_info, []),
         head.prices.alpha_prices(),  # same spot price a card shows, for every subnet at once
     )
+    live = [info for info in infos if info and info["netuid"] != 0]  # root has no alpha or miners
+    # Every block the chain hands each subnet a slice of TAO; tao_in_emission is that
+    # slice, so a subnet's share of the total is its emission percentage.
+    network_emission = sum(info["tao_in_emission"] for info in live)
     subnets = [
         {
             "netuid": info["netuid"],
@@ -284,9 +288,10 @@ async def subnet_list(client) -> list[dict]:
             "symbol": text(info["token_symbol"]),
             "price_tao": prices.get(info["netuid"]),
             "price_rank": None,  # filled in below; stays None when the chain has no price
+            "emission_pct": info["tao_in_emission"] / network_emission * 100 if network_emission else None,
+            "emission_tao_per_day": info["tao_in_emission"] * BLOCKS_PER_DAY / RAO_PER_UNIT,
         }
-        for info in infos
-        if info and info["netuid"] != 0  # root has no alpha or miners
+        for info in live
     ]
     priced = [s for s in subnets if s["price_tao"] is not None]
     for rank, subnet in enumerate(sorted(priced, key=lambda s: s["price_tao"], reverse=True), start=1):
