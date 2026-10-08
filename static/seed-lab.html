@@ -31,6 +31,7 @@
     --accent-soft: rgba(59, 125, 208, 0.12);
     --hit: #b26a00;
     --hit-soft: rgba(178, 106, 0, 0.16);
+    --graph: #3c9b53; /* light green, 3.4:1 on this surface */
   }
   @media (prefers-color-scheme: dark) {
     :root:not([data-theme="light"]) {
@@ -50,6 +51,7 @@
       --accent-soft: rgba(106, 154, 216, 0.16);
       --hit: #e0a341;
       --hit-soft: rgba(224, 163, 65, 0.18);
+      --graph: #74d68a; /* lighter still, for the dark surface */
     }
   }
   :root[data-theme="dark"] {
@@ -69,6 +71,7 @@
     --accent-soft: rgba(106, 154, 216, 0.16);
     --hit: #e0a341;
     --hit-soft: rgba(224, 163, 65, 0.18);
+    --graph: #74d68a;
   }
 
   * { box-sizing: border-box; }
@@ -79,7 +82,7 @@
     color: var(--ink);
     font: 15px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
   }
-  main { max-width: 860px; margin: 0 auto; padding: 16px 16px 48px; }
+  main { max-width: 960px; margin: 0 auto; padding: 16px 16px 48px; } /* room for the load charts */
   a { color: var(--accent); }
   code, .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
 
@@ -124,6 +127,34 @@
   .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(104px, 1fr)); gap: 14px 16px; }
   .stat[title] { cursor: help; }
 
+  /* Server load: one filled area chart per core over the last minute, plus one
+     for memory — the shape Task Manager uses. One measure, so one colour; the
+     current figure is printed above every chart, never colour alone. */
+  .load-head { margin: 16px 0 8px; font-size: 12px; color: var(--ink-2); }
+  .load-head:first-of-type { margin-top: 0; }
+  .graphs { display: grid; grid-template-columns: repeat(auto-fit, minmax(196px, 1fr)); gap: 12px; }
+  .graphs.wide { grid-template-columns: 1fr; }
+  .graph { position: relative; margin: 0; }
+  .graph figcaption { display: flex; justify-content: space-between; gap: 8px; margin-bottom: 4px; font-size: 12px; }
+  .graph-name { color: var(--ink-2); }
+  .graph-now { color: var(--ink); font-weight: 600; font-variant-numeric: tabular-nums; }
+  .graph svg {
+    display: block; width: 100%; height: 74px;
+    background: var(--surface); border: 1px solid var(--divider); border-radius: 6px;
+  }
+  .graphs.wide .graph svg { height: 96px; }
+  .graph .grid line { stroke: var(--hairline); stroke-width: 1; vector-effect: non-scaling-stroke; }
+  .graph .area { fill: var(--graph); opacity: 0.2; }
+  .graph .line {
+    fill: none; stroke: var(--graph); stroke-width: 2;
+    stroke-linejoin: round; stroke-linecap: round; vector-effect: non-scaling-stroke;
+  }
+  .graph .cursor { stroke: var(--rule); stroke-width: 1; vector-effect: non-scaling-stroke; }
+  .graph-tip {
+    position: absolute; top: 22px; padding: 2px 6px; transform: translateX(-50%);
+    background: var(--ink); color: var(--page); border-radius: 4px;
+    font-size: 11px; font-variant-numeric: tabular-nums; white-space: nowrap; pointer-events: none;
+  }
   .stat .label { font-size: 12px; color: var(--ink-2); }
   .stat .value { font-size: 22px; font-weight: 600; font-variant-numeric: tabular-nums; }
   .stat .value.small { font-size: 16px; }
@@ -189,6 +220,17 @@
       thrown away the moment the address was worked out, so only the address is
       left.</p>
     <div id="hitlist"></div>
+  </div>
+
+  <!-- Server load: a chart per core, then memory and the network -->
+  <div class="card">
+    <h2>Server load</h2>
+    <p class="load-head">CPU — % utilisation, last 60 seconds</p>
+    <div class="graphs" id="cores"></div>
+    <p class="load-head">Memory</p>
+    <div class="graphs wide" id="memory"></div>
+    <p class="load-head" id="net-head">Network</p>
+    <div class="graphs" id="network"></div>
   </div>
 
   <!-- Live feed -->
@@ -294,6 +336,128 @@
       `<p class="mono">${esc(h.ss58)}<br>free τ${taoStr(h.free_tao)} · staked τ${taoStr(h.staked_tao)}</p>`).join("");
   }
 
+  // What the hunt costs the server, drawn the way Task Manager draws it: a
+  // filled area chart per core over the last minute, and one for memory. The
+  // newest sample is at the right edge and older ones scroll off to the left.
+  const gb = (bytes) => `${(bytes / 2 ** 30).toFixed(1)} GB`;
+  const SECONDS = 60; // samples kept per chart, one a second
+  const charts = new Map(); // key -> {figure, area, line, cursor, now, tip, history, format}
+
+  function makeChart(parent, key, name, format) {
+    const figure = document.createElement("figure");
+    figure.className = "graph";
+    figure.innerHTML =
+      `<figcaption><span class="graph-name">${name}</span><span class="graph-now">—</span></figcaption>` +
+      `<svg viewBox="0 0 100 100" preserveAspectRatio="none" role="img">` +
+        `<g class="grid">` +
+          [25, 50, 75].map((y) => `<line x1="0" y1="${y}" x2="100" y2="${y}"/>`).join("") +
+          [25, 50, 75].map((x) => `<line x1="${x}" y1="0" x2="${x}" y2="100"/>`).join("") +
+        `</g>` +
+        `<path class="area"/><path class="line"/><line class="cursor" y1="0" y2="100" style="display:none"/>` +
+      `</svg>`;
+    parent.append(figure);
+    const chart = {
+      figure, format, history: [], name,
+      svg: figure.querySelector("svg"),
+      area: figure.querySelector(".area"),
+      line: figure.querySelector(".line"),
+      cursor: figure.querySelector(".cursor"),
+      now: figure.querySelector(".graph-now"),
+      tip: null,
+    };
+    // Hovering reads a point off the chart: which sample, and what it was.
+    chart.svg.addEventListener("mousemove", (e) => {
+      const box = chart.svg.getBoundingClientRect();
+      const fraction = Math.min(1, Math.max(0, (e.clientX - box.left) / box.width));
+      const slot = Math.round(fraction * (SECONDS - 1));
+      const index = chart.history.length - SECONDS + slot;
+      if (index < 0 || index >= chart.history.length) return hideTip(chart);
+      if (!chart.tip) {
+        chart.tip = document.createElement("div");
+        chart.tip.className = "graph-tip";
+        chart.figure.append(chart.tip);
+      }
+      const ago = chart.history.length - 1 - index;
+      chart.tip.textContent = `${chart.format(chart.history[index])} · ${ago === 0 ? "now" : `${ago}s ago`}`;
+      // Keep the label inside its own chart rather than letting it spill over a
+      // neighbour: clamp by its measured width, not by a guessed percentage.
+      const half = chart.tip.offsetWidth / 2 + 2;
+      const width = chart.figure.clientWidth;
+      chart.tip.style.left = `${Math.min(width - half, Math.max(half, fraction * width))}px`;
+      chart.cursor.setAttribute("x1", fraction * 100);
+      chart.cursor.setAttribute("x2", fraction * 100);
+      chart.cursor.style.display = "";
+    });
+    chart.svg.addEventListener("mouseleave", () => hideTip(chart));
+    charts.set(key, chart);
+    return chart;
+  }
+
+  function hideTip(chart) {
+    chart.cursor.style.display = "none";
+    if (chart.tip) chart.tip.remove();
+    chart.tip = null;
+  }
+
+  function addSample(chart, value) {
+    chart.history.push(value);
+    if (chart.history.length > SECONDS) chart.history.shift();
+  }
+
+  function drawChart(chart, max) {
+    const shown = chart.history;
+    const value = shown[shown.length - 1];
+    // Right-aligned: a fresh chart fills in from the right, as Task Manager's does.
+    const x = (i) => ((SECONDS - shown.length + i) / (SECONDS - 1)) * 100;
+    const y = (v) => 100 - Math.min(100, Math.max(0, (v / max) * 100));
+    const points = shown.map((v, i) => `${x(i).toFixed(2)},${y(v).toFixed(2)}`).join("L");
+    chart.line.setAttribute("d", shown.length > 1 ? `M${points}` : "");
+    chart.area.setAttribute("d", shown.length > 1 ? `M${x(0).toFixed(2)},100L${points}L100,100Z` : "");
+    chart.now.textContent = chart.format(value);
+    chart.svg.setAttribute("aria-label", `${chart.name}: ${chart.format(value)} now, last ${SECONDS} seconds`);
+  }
+
+  function sample(chart, value, max) {
+    addSample(chart, value);
+    drawChart(chart, max);
+  }
+
+  // Bytes a second, in the unit that keeps the number short.
+  function rate(bytes) {
+    if (bytes >= 2 ** 20) return `${(bytes / 2 ** 20).toFixed(1)} MB/s`;
+    if (bytes >= 1024) return `${Math.round(bytes / 1024)} KB/s`;
+    return `${Math.round(bytes)} B/s`;
+  }
+
+  function drawUsage(u) {
+    const cores = u.core_pct || [];
+    const pct = (v) => `${Math.round(v)}%`;
+    cores.forEach((value, i) => {
+      const chart = charts.get(`core${i}`) || makeChart($("cores"), `core${i}`, `Core ${i}`, pct);
+      sample(chart, value, 100);
+    });
+
+    if (u.machine_mem_total_bytes) {
+      const total = u.machine_mem_total_bytes;
+      const chart = charts.get("memory") ||
+        makeChart($("memory"), "memory", "Memory in use", (v) => `${gb(v)} of ${gb(total)}`);
+      sample(chart, u.machine_mem_used_bytes, total);
+    }
+
+    if (u.net_down_bps != null) {
+      const down = charts.get("down") || makeChart($("network"), "down", "Download", rate);
+      const up = charts.get("up") || makeChart($("network"), "up", "Upload", rate);
+      addSample(down, u.net_down_bps);
+      addSample(up, u.net_up_bps);
+      // Both charts share a scale, so the two can be compared by eye; it follows
+      // the busiest moment on screen, never dropping below a quiet 64 KB/s.
+      const peak = Math.max(64 * 1024, ...down.history, ...up.history);
+      drawChart(down, peak);
+      drawChart(up, peak);
+      $("net-head").textContent = `Network — both charts to the same scale, up to ${rate(peak)}`;
+    }
+  }
+
   function render() {
     const tao = run.hits.reduce((sum, h) => sum + h.free_tao + h.staked_tao, 0);
     const rate = run.elapsed > 0 ? run.tried / run.elapsed : 0;
@@ -304,6 +468,7 @@
     $("s-hits").textContent = fmtInt(run.hits.length);
     $("s-tao").textContent = `τ${taoStr(tao)}`;
     $("s-elapsed").textContent = run.elapsed < 90 ? `${Math.round(run.elapsed)}s` : fmtDuration(run.elapsed);
+    drawUsage(run.usage || {});
     $("start").textContent = run.running ? "Stop" : run.tried ? "Resume" : "Start hunting";
     $("start").classList.toggle("primary", !run.running);
     drawFeed();

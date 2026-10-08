@@ -414,6 +414,97 @@ async def hunt_batch(client, count: int) -> dict:
     }
 
 
+CLOCK_TICKS = os.sysconf("SC_CLK_TCK")
+PAGE_SIZE = os.sysconf("SC_PAGE_SIZE")
+
+
+class Usage:
+    """What the app and the machine are using, read from /proc — no extra packages.
+
+    A CPU percentage needs two readings, so each call measures the stretch since
+    the previous one. The page asks once a second, which makes that the window.
+    """
+
+    def __init__(self):
+        self._last: tuple[float, float, list[tuple[int, int]]] | None = None
+        self._last_net: tuple[float, int, int] | None = None
+
+    @staticmethod
+    def _process_cpu_seconds() -> float:
+        # Fields after the ")" that closes the process name: utime and stime.
+        fields = Path("/proc/self/stat").read_text().rsplit(")", 1)[1].split()
+        return (int(fields[11]) + int(fields[12])) / CLOCK_TICKS
+
+    @staticmethod
+    def _cpu_jiffies() -> list[tuple[int, int]]:
+        """(busy + idle, idle) for the whole machine first, then for each core."""
+        rows = []
+        for line in Path("/proc/stat").read_text().splitlines():
+            if not line.startswith("cpu"):
+                break
+            values = [int(v) for v in line.split()[1:]]
+            rows.append((sum(values), values[3] + values[4]))  # everything, and idle + iowait
+        return rows
+
+    @staticmethod
+    def _network_bytes() -> tuple[int, int]:
+        """Bytes in and out across every real interface; loopback doesn't count."""
+        received = sent = 0
+        for line in Path("/proc/net/dev").read_text().splitlines()[2:]:
+            name, _, counters = line.partition(":")
+            if name.strip() == "lo":
+                continue
+            fields = counters.split()
+            received, sent = received + int(fields[0]), sent + int(fields[8])
+        return received, sent
+
+    @staticmethod
+    def _busy_pct(now: tuple[int, int], before: tuple[int, int]) -> float | None:
+        ticks = now[0] - before[0]
+        return max(0.0, (ticks - (now[1] - before[1])) / ticks * 100) if ticks > 0 else None
+
+    def read(self) -> dict:
+        now = time.monotonic()
+        process_cpu, cpus = self._process_cpu_seconds(), self._cpu_jiffies()
+        process_pct, machine_pct, core_pct = None, None, []
+        if self._last and len(self._last[2]) == len(cpus):
+            seconds = now - self._last[0]
+            if seconds > 0:
+                process_pct = max(0.0, (process_cpu - self._last[1]) / seconds * 100)
+            machine_pct = self._busy_pct(cpus[0], self._last[2][0])
+            core_pct = [self._busy_pct(core, was) for core, was in zip(cpus[1:], self._last[2][1:])]
+        self._last = (now, process_cpu, cpus)
+
+        received, sent = self._network_bytes()
+        down_bps = up_bps = None
+        if self._last_net:
+            seconds = now - self._last_net[0]
+            if seconds > 0:
+                down_bps = max(0.0, (received - self._last_net[1]) / seconds)
+                up_bps = max(0.0, (sent - self._last_net[2]) / seconds)
+        self._last_net = (now, received, sent)
+
+        memory = {}
+        for line in Path("/proc/meminfo").read_text().splitlines():
+            name, _, rest = line.partition(":")
+            memory[name] = int(rest.split()[0]) * 1024  # kB on every line
+        total = memory.get("MemTotal", 0)
+        return {
+            "cpu_pct": process_pct,  # the app's share of one core, as top counts it
+            "machine_cpu_pct": machine_pct,  # the whole machine, across every core
+            "core_pct": core_pct,  # each core on its own
+            "cores": os.cpu_count(),
+            "rss_bytes": int(Path("/proc/self/statm").read_text().split()[1]) * PAGE_SIZE,
+            "machine_mem_used_bytes": total - memory.get("MemAvailable", 0),
+            "machine_mem_total_bytes": total,
+            "net_down_bps": down_bps,  # bytes a second over every real interface
+            "net_up_bps": up_bps,
+        }
+
+
+usage = Usage()
+
+
 class Hunt:
     """One hunt, running here rather than in a browser tab.
 
@@ -449,6 +540,7 @@ class Hunt:
             "samples": self.samples,
             "hits": self.hits,
             "error": self.error,
+            "usage": usage.read(),  # hunting is the heaviest thing this app does
         }
 
     def start(self, client) -> dict:
