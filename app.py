@@ -22,6 +22,7 @@ import re
 import secrets
 import statistics
 import time
+from concurrent.futures import ProcessPoolExecutor
 from contextlib import asynccontextmanager
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -59,6 +60,13 @@ async def cached(key, ttl, fetch):
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # Fork the wallet generators before connecting to the chain: the process is
+    # still single-threaded here, which is the safe moment to fork.
+    pool = ProcessPoolExecutor(max_workers=GENERATOR_WORKERS) if SEED_LAB_PASSWORD else None
+    app.state.generators = pool
+    if pool:
+        await asyncio.gather(*(asyncio.get_running_loop().run_in_executor(pool, generate_addresses, 1)
+                               for _ in range(GENERATOR_WORKERS)))  # start them now, not mid-hunt
     # One connection for the app's lifetime. The SDK reconnects on drops and
     # retries reads of pruned (old) state against archive nodes on its own.
     async with bt.Subtensor(NETWORK) as client:
@@ -67,6 +75,8 @@ async def lifespan(app: FastAPI):
             yield
         finally:
             await hunt.stop()  # don't leave a hunt holding the connection open
+            if pool:
+                pool.shutdown(wait=False, cancel_futures=True)
 
 
 app = FastAPI(title="Subnet Viewer", lifespan=lifespan)
@@ -337,8 +347,14 @@ async def get_subnet(netuid: int = PathParam(ge=1, le=65535)):
 # dropped, so no response can hand anyone the keys to a wallet.
 
 Keypair = sp_core.Keypair
-HUNT_BATCH = 50  # wallets per round trip; each batch costs 2 reads of the chain
-HUNT_PAUSE = 0.2  # seconds between batches, so one hunt can't swamp the node the cards share
+# A chain round trip costs about the same whether it carries 50 addresses or 500,
+# so a big batch is worth far more than a fast loop: it is the same two reads.
+HUNT_BATCH = int(os.environ.get("SEED_LAB_BATCH", "1000"))
+HUNT_PAUSE = 0.1  # a breather between batches, so one hunt can't swamp the node the cards share
+# Making a wallet is CPU-bound and holds the GIL, so threads don't help — these do.
+# One core is left for the server itself: taking it too raises the hunt's rate by
+# about a third but makes the dashboard noticeably slower while a hunt runs.
+GENERATOR_WORKERS = int(os.environ.get("SEED_LAB_WORKERS", "0")) or max(2, (os.cpu_count() or 2) - 1)
 HUNT_IDLE_STOP = 300  # a hunt nobody is watching stops after this many seconds
 FEED_SAMPLES = 8  # recent wallets kept for the page's live feed
 
@@ -388,9 +404,27 @@ def _tao(value) -> float:
     return float(getattr(value, "tao", 0.0)) if value is not None else 0.0
 
 
-async def hunt_batch(client, count: int) -> dict:
-    """Make ``count`` random wallets and check each one's balance on-chain."""
-    addresses = await asyncio.to_thread(lambda: [random_address() for _ in range(count)])
+def generate_addresses(count: int) -> list[str]:
+    """Runs in a worker process: the seeds never leave it, only the addresses."""
+    return [random_address() for _ in range(count)]
+
+
+async def make_addresses(count: int) -> list[str]:
+    """``count`` fresh addresses, generated across the worker processes at once."""
+    pool = getattr(app.state, "generators", None)
+    if pool is None:  # no pool (Seed Lab off, or it failed to start): do it here
+        return await asyncio.to_thread(generate_addresses, count)
+    share = max(1, count // GENERATOR_WORKERS)
+    chunks = [share] * (count // share)
+    if count % share:
+        chunks.append(count % share)
+    loop = asyncio.get_running_loop()
+    batches = await asyncio.gather(*(loop.run_in_executor(pool, generate_addresses, n) for n in chunks))
+    return [address for batch in batches for address in batch]
+
+
+async def check_addresses(client, addresses: list[str]) -> dict:
+    """Ask the chain what each of these addresses holds."""
     head = await client.at()
     balances, stakes = await asyncio.gather(
         head.read("balances", coldkey_ss58s=addresses),
@@ -407,7 +441,7 @@ async def hunt_batch(client, count: int) -> dict:
             hits.append(entry)
 
     return {
-        "tried": count,
+        "tried": len(addresses),
         "block": head.block,
         "samples": checked[:6],  # a handful for the live feed
         "hits": hits,            # funded wallets: always empty in practice
@@ -565,9 +599,14 @@ class Hunt:
         return self.status()
 
     async def _run(self, client) -> None:
+        # The next batch of wallets is made while the current one is being
+        # checked, so neither the cores nor the chain connection sits idle.
+        upcoming = asyncio.create_task(make_addresses(HUNT_BATCH))
         try:
             while True:
-                batch = await hunt_batch(client, HUNT_BATCH)
+                addresses = await upcoming
+                upcoming = asyncio.create_task(make_addresses(HUNT_BATCH))
+                batch = await check_addresses(client, addresses)
                 self.tried += batch["tried"]
                 self.samples = (batch["samples"][::-1] + self.samples)[:FEED_SAMPLES]
                 self.hits.extend(batch["hits"])
@@ -580,6 +619,7 @@ class Hunt:
         except Exception as e:
             self.error = f"Chain query failed: {type(e).__name__}: {e}"
         finally:
+            upcoming.cancel()
             if self.started_at is not None:
                 self.elapsed += time.monotonic() - self.started_at
                 self.started_at = None
