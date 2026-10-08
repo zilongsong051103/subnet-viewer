@@ -35,7 +35,11 @@ Then open http://127.0.0.1:8000.
 
 ## Access
 
-The dashboard and its API are public. Seed Lab (`/seed-lab` and its API) needs a password. Clicking **Seed Lab →** on the dashboard asks for it first, and opening `/seed-lab` directly without logging in sends you back to that password box. A login lasts 12 hours, or until **Log out** or a server restart. To turn Seed Lab on:
+The dashboard and its API are public. Seed Lab (`/seed-lab` and its API) needs a password. Clicking **Seed Lab →** on the dashboard asks for it first, and opening `/seed-lab` directly without logging in sends you back to that password box. A login lasts 12 hours, or until **Log out** or a server restart.
+
+Seed Lab's hunt runs in the server, not the browser, so reloading or closing the page doesn't interrupt it and reopening shows it still going. It pauses between batches so it can't swamp the node the dashboard reads from, and a hunt no page has looked at for five minutes stops on its own.
+
+To turn Seed Lab on:
 
 ```bash
 SEED_LAB_PASSWORD='a long random password' .venv/bin/python app.py
@@ -49,7 +53,8 @@ If the app is reachable beyond your own machine, put it behind HTTPS (for exampl
 - `GET /api/subnets/{netuid}`: everything shown on one card (cached for 30 seconds)
 - `GET /api/seed-lab/session`: whether Seed Lab is turned on, and whether this browser is logged in
 - `POST /api/seed-lab/login` with `{"password": "…"}`: logs in (sets a session cookie); `POST /api/seed-lab/logout` logs out
-- `POST /api/seed-lab/hunt` (login required): generates `count` random wallets (1–100) and checks their balances on the chain
+- `GET /api/seed-lab/hunt` (login required): how the hunt is going — whether it is running, wallets checked, time spent, recent wallets and any funded ones
+- `POST /api/seed-lab/hunt/start`, `/stop`, `/reset` (login required): control that hunt
 
 ## How the numbers are calculated
 

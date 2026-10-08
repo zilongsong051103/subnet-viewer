@@ -14,6 +14,7 @@ Run:  .venv/bin/python app.py      (then open http://127.0.0.1:8000)
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import hashlib
 import hmac
 import os
@@ -62,7 +63,10 @@ async def lifespan(app: FastAPI):
     # retries reads of pruned (old) state against archive nodes on its own.
     async with bt.Subtensor(NETWORK) as client:
         app.state.client = client
-        yield
+        try:
+            yield
+        finally:
+            await hunt.stop()  # don't leave a hunt holding the connection open
 
 
 app = FastAPI(title="Subnet Viewer", lifespan=lifespan)
@@ -333,7 +337,10 @@ async def get_subnet(netuid: int = PathParam(ge=1, le=65535)):
 # dropped, so no response can hand anyone the keys to a wallet.
 
 Keypair = sp_core.Keypair
-HUNT_MAX_COUNT = 100  # each request also makes 2 batched chain reads; keep it bounded
+HUNT_BATCH = 50  # wallets per round trip; each batch costs 2 reads of the chain
+HUNT_PAUSE = 0.2  # seconds between batches, so one hunt can't swamp the node the cards share
+HUNT_IDLE_STOP = 300  # a hunt nobody is watching stops after this many seconds
+FEED_SAMPLES = 8  # recent wallets kept for the page's live feed
 
 # The dashboard is public; Seed Lab (page and API) needs a login. The password
 # box is on the dashboard: a correct password sets a signed session cookie. With
@@ -369,10 +376,6 @@ def require_seed_lab_login(request: Request) -> None:
 
 class LoginRequest(BaseModel):
     password: str = Field(max_length=1024)
-
-
-class HuntRequest(BaseModel):
-    count: int = Field(default=50, ge=1, le=HUNT_MAX_COUNT)
 
 
 def random_address() -> str:
@@ -411,12 +414,106 @@ async def hunt_batch(client, count: int) -> dict:
     }
 
 
-@app.post("/api/seed-lab/hunt", dependencies=[Depends(require_seed_lab_login)])
-async def seed_lab_hunt(req: HuntRequest):
-    try:
-        return await hunt_batch(app.state.client, req.count)
-    except Exception as e:
-        raise chain_error(e) from e
+class Hunt:
+    """One hunt, running here rather than in a browser tab.
+
+    The page only starts, stops and reads it, so reloading, closing or opening a
+    second tab changes nothing: the count carries on. A hunt that no page has
+    asked about for ``HUNT_IDLE_STOP`` seconds stops on its own, so a closed tab
+    doesn't leave the chain being queried forever.
+    """
+
+    def __init__(self):
+        self.task: asyncio.Task | None = None
+        self.started_at: float | None = None  # set while a stretch is running
+        self.elapsed = 0.0  # seconds spent hunting, banked when a stretch ends
+        self.tried = 0
+        self.hits: list[dict] = []
+        self.samples: list[dict] = []
+        self.error: str | None = None
+        self.last_seen = 0.0
+
+    @property
+    def running(self) -> bool:
+        return self.task is not None and not self.task.done()
+
+    def seconds(self) -> float:
+        return self.elapsed + (time.monotonic() - self.started_at if self.started_at else 0.0)
+
+    def status(self) -> dict:
+        self.last_seen = time.monotonic()  # someone is watching
+        return {
+            "running": self.running,
+            "tried": self.tried,
+            "elapsed": self.seconds(),
+            "samples": self.samples,
+            "hits": self.hits,
+            "error": self.error,
+        }
+
+    def start(self, client) -> dict:
+        if not self.running:
+            self.error = None
+            self.started_at = time.monotonic()
+            self.last_seen = time.monotonic()
+            self.task = asyncio.create_task(self._run(client))
+        return self.status()
+
+    async def stop(self) -> dict:
+        task, self.task = self.task, None
+        if task and not task.done():
+            task.cancel()  # _run banks the elapsed time on its way out
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+        return self.status()
+
+    async def reset(self) -> dict:
+        await self.stop()
+        self.elapsed, self.tried, self.hits, self.samples, self.error = 0.0, 0, [], [], None
+        return self.status()
+
+    async def _run(self, client) -> None:
+        try:
+            while True:
+                batch = await hunt_batch(client, HUNT_BATCH)
+                self.tried += batch["tried"]
+                self.samples = (batch["samples"][::-1] + self.samples)[:FEED_SAMPLES]
+                self.hits.extend(batch["hits"])
+                if time.monotonic() - self.last_seen > HUNT_IDLE_STOP:
+                    self.error = "Stopped: no page was watching for a while"
+                    return
+                await asyncio.sleep(HUNT_PAUSE)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            self.error = f"Chain query failed: {type(e).__name__}: {e}"
+        finally:
+            if self.started_at is not None:
+                self.elapsed += time.monotonic() - self.started_at
+                self.started_at = None
+
+
+hunt = Hunt()
+
+
+@app.get("/api/seed-lab/hunt", dependencies=[Depends(require_seed_lab_login)])
+async def seed_lab_hunt_status():
+    return hunt.status()
+
+
+@app.post("/api/seed-lab/hunt/start", dependencies=[Depends(require_seed_lab_login)])
+async def seed_lab_hunt_start():
+    return hunt.start(app.state.client)
+
+
+@app.post("/api/seed-lab/hunt/stop", dependencies=[Depends(require_seed_lab_login)])
+async def seed_lab_hunt_stop():
+    return await hunt.stop()
+
+
+@app.post("/api/seed-lab/hunt/reset", dependencies=[Depends(require_seed_lab_login)])
+async def seed_lab_hunt_reset():
+    return await hunt.reset()
 
 
 @app.get("/api/seed-lab/session")

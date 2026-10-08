@@ -121,7 +121,9 @@
   :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
   .controls { display: flex; gap: 10px; justify-content: center; }
 
-  .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 14px 16px; }
+  .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(104px, 1fr)); gap: 14px 16px; }
+  .stat[title] { cursor: help; }
+
   .stat .label { font-size: 12px; color: var(--ink-2); }
   .stat .value { font-size: 22px; font-weight: 600; font-variant-numeric: tabular-nums; }
   .stat .value.small { font-size: 16px; }
@@ -233,57 +235,31 @@
   }
   const taoStr = (v) => (v >= 1 ? v.toLocaleString("en-US", { maximumFractionDigits: 2 }) : String(+v.toFixed(4)));
 
-  // ---- state ---------------------------------------------------------------
-  const state = { running: false, tried: 0, hits: 0, tao: 0, startedAt: 0, lastRate: 500 };
-  const BATCH = 50;
+  // ---- the hunt ------------------------------------------------------------
+  // The hunt runs on the server, not in this tab. The page starts it, stops it
+  // and reads where it has got to, so reloading or closing the page doesn't
+  // interrupt it. The server stops a hunt no page has read for a few minutes.
+  const POLL_MS = 1000;
+  let run = { running: false, tried: 0, elapsed: 0, samples: [], hits: [], error: null };
 
-  function liveRate() {
-    const secs = (performance.now() - state.startedAt) / 1000;
-    return secs > 0 ? state.tried / secs : 0;
-  }
-
-  // ---- feed ----------------------------------------------------------------
-  const feedRows = [];
-  function pushFeed(samples) {
-    for (const w of samples) {
-      const funded = w.free_tao > 0 || w.staked_tao > 0;
-      feedRows.unshift(
-        `<tr${funded ? ' class="funded"' : ""}>` +
-        `<td class="addr">${w.ss58.slice(0, 8)}…${w.ss58.slice(-6)}</td>` +
-        `<td class="${w.free_tao ? "" : "zero"}">τ${taoStr(w.free_tao)}</td>` +
-        `<td class="${w.staked_tao ? "" : "zero"}">τ${taoStr(w.staked_tao)}</td>` +
-        `<td class="tag">${funded ? "⚑ yes" : "empty"}</td></tr>`
-      );
+  async function api(path, method = "GET") {
+    const res = await fetch(path, { method });
+    if (res.status === 401) {
+      location.assign("/?login=seed-lab"); // session ended: ask for the password again
+      throw new Error("login");
     }
-    feedRows.length = Math.min(feedRows.length, 8);
-    $("feed").innerHTML = feedRows.join("");
+    if (!res.ok) throw new Error((await res.json().catch(() => ({}))).detail || `Error ${res.status}`);
+    return res.json();
   }
 
-  // ---- the hunt loop -------------------------------------------------------
-  async function huntLoop() {
-    while (state.running) {
-      let data;
-      try {
-        const res = await fetch("/api/seed-lab/hunt", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ count: BATCH }),
-        });
-        if (res.status === 401) return location.assign("/?login=seed-lab"); // session ended: ask for the password again
-        if (!res.ok) throw new Error((await res.json().catch(() => ({}))).detail || `Error ${res.status}`);
-        data = await res.json();
-      } catch (e) {
-        stop();
-        showError(`Stopped: ${e.message}`);
-        return;
-      }
-      if (!state.running) return;
-
-      state.tried += data.tried;
-      pushFeed(data.samples);
-      if (data.hits.length) recordHits(data.hits);
+  async function sync(path = "/api/seed-lab/hunt", method = "GET") {
+    try {
+      run = await api(path, method);
+      $("error").hidden = !run.error;
+      if (run.error) $("error").textContent = run.error;
       render();
-      await new Promise((r) => setTimeout(r, 0));
+    } catch (e) {
+      if (e.message !== "login") showError(`Can't reach the hunt: ${e.message}`);
     }
   }
 
@@ -292,68 +268,63 @@
     $("error").hidden = false;
   }
 
-  function recordHits(hits) {
-    state.hits += hits.length;
-    for (const h of hits) {
-      state.tao += h.free_tao + h.staked_tao;
-      $("hitlist").insertAdjacentHTML("beforeend",
-        `<p class="mono">${h.ss58}<br>free τ${taoStr(h.free_tao)} · staked τ${taoStr(h.staked_tao)}</p>`);
+  // ---- drawing ---------------------------------------------------------------
+  // Values arrive as JSON, so escape anything going near innerHTML.
+  const esc = (v) => String(v).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+
+  function drawFeed() {
+    if (!run.samples.length) {
+      $("feed").innerHTML = '<tr><td class="tag" colspan="4">Press “Start hunting”.</td></tr>';
+      return;
     }
-    $("hitbox").hidden = false;
-    $("scoreboard").classList.add("hit");
-    render();
+    $("feed").innerHTML = run.samples.map((w) => {
+      const funded = w.free_tao > 0 || w.staked_tao > 0;
+      return `<tr${funded ? ' class="funded"' : ""}>` +
+        `<td class="addr">${esc(w.ss58.slice(0, 8))}…${esc(w.ss58.slice(-6))}</td>` +
+        `<td class="${w.free_tao ? "" : "zero"}">τ${taoStr(w.free_tao)}</td>` +
+        `<td class="${w.staked_tao ? "" : "zero"}">τ${taoStr(w.staked_tao)}</td>` +
+        `<td class="tag">${funded ? "⚑ yes" : "empty"}</td></tr>`;
+    }).join("");
+  }
+
+  function drawHits() {
+    $("hitbox").hidden = !run.hits.length;
+    $("scoreboard").classList.toggle("hit", run.hits.length > 0);
+    $("hitlist").innerHTML = run.hits.map((h) =>
+      `<p class="mono">${esc(h.ss58)}<br>free τ${taoStr(h.free_tao)} · staked τ${taoStr(h.staked_tao)}</p>`).join("");
   }
 
   function render() {
-    const rate = liveRate();
-    if (rate > 0) state.lastRate = rate;
-    $("score").textContent = fmtInt(state.hits);
-    $("score-checked").textContent = fmtInt(state.tried);
-    $("s-tried").textContent = fmtInt(state.tried);
+    const tao = run.hits.reduce((sum, h) => sum + h.free_tao + h.staked_tao, 0);
+    const rate = run.elapsed > 0 ? run.tried / run.elapsed : 0;
+    $("score").textContent = fmtInt(run.hits.length);
+    $("score-checked").textContent = fmtInt(run.tried);
+    $("s-tried").textContent = fmtInt(run.tried);
     $("s-rate").textContent = fmtInt(rate);
-    $("s-hits").textContent = fmtInt(state.hits);
-    $("s-tao").textContent = `τ${taoStr(state.tao)}`;
-    $("s-elapsed").textContent = fmtDuration((performance.now() - state.startedAt) / 1000).replace(" seconds", "s");
-  }
-
-  function start() {
-    if (state.running) return;
-    $("error").hidden = true;
-    state.running = true;
-    state.startedAt = performance.now() - (state.tried / Math.max(1, state.lastRate)) * 1000; // keep rate sane after resume
-    $("start").textContent = "Stop";
-    $("start").classList.remove("primary");
-    huntLoop();
-  }
-
-  function stop() {
-    state.running = false;
-    $("start").textContent = state.tried ? "Resume" : "Start hunting";
-    $("start").classList.add("primary");
-    render();
-  }
-
-  function reset() {
-    stop();
-    Object.assign(state, { tried: 0, hits: 0, tao: 0 });
-    feedRows.length = 0;
-    $("feed").innerHTML = '<tr><td class="tag" colspan="4">Press “Start hunting”.</td></tr>';
-    $("hitbox").hidden = true;
-    $("hitlist").innerHTML = "";
-    $("scoreboard").classList.remove("hit");
-    $("error").hidden = true;
-    $("start").textContent = "Start hunting";
-    render();
+    $("s-hits").textContent = fmtInt(run.hits.length);
+    $("s-tao").textContent = `τ${taoStr(tao)}`;
+    $("s-elapsed").textContent = run.elapsed < 90 ? `${Math.round(run.elapsed)}s` : fmtDuration(run.elapsed);
+    $("start").textContent = run.running ? "Stop" : run.tried ? "Resume" : "Start hunting";
+    $("start").classList.toggle("primary", !run.running);
+    drawFeed();
+    drawHits();
   }
 
   // ---- wiring --------------------------------------------------------------
-  $("start").addEventListener("click", () => (state.running ? stop() : start()));
-  $("reset").addEventListener("click", reset);
+  $("start").addEventListener("click", () =>
+    sync(run.running ? "/api/seed-lab/hunt/stop" : "/api/seed-lab/hunt/start", "POST"));
+  $("reset").addEventListener("click", () => sync("/api/seed-lab/hunt/reset", "POST"));
   $("logout").addEventListener("click", async () => {
-    stop();
     try { await fetch("/api/seed-lab/logout", { method: "POST" }); } catch {}
-    location.assign("/");
+    location.assign("/"); // the hunt keeps going; logging back in shows it again
   });
+
+  // Reading the status is also how the server knows someone is still watching.
+  setInterval(sync, POLL_MS);
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "visible") sync();
+  });
+  sync();
 
   // ---- theme ---------------------------------------------------------------
   const THEME_KEY = "subnet-viewer:theme";
