@@ -132,7 +132,7 @@
   table.feed th, table.feed td { text-align: right; padding: 6px 8px; border-bottom: 1px solid var(--hairline); white-space: nowrap; }
   table.feed th { font-weight: 400; color: var(--ink-2); font-size: 12px; }
   table.feed td:first-child, table.feed th:first-child { text-align: left; }
-  table.feed .addr { font-family: ui-monospace, monospace; }
+  table.feed .addr { font-family: ui-monospace, monospace; font-size: 12px; } /* a full address is 48 characters */
   table.feed .zero { color: var(--ink-2); }
   table.feed .tag { color: var(--ink-2); }
   table.feed tr.funded td { background: var(--hit-soft); color: var(--hit); font-weight: 600; }
@@ -280,7 +280,7 @@
     $("feed").innerHTML = run.samples.map((w) => {
       const funded = w.free_tao > 0 || w.staked_tao > 0;
       return `<tr${funded ? ' class="funded"' : ""}>` +
-        `<td class="addr">${esc(w.ss58.slice(0, 8))}…${esc(w.ss58.slice(-6))}</td>` +
+        `<td class="addr">${esc(w.ss58)}</td>` +
         `<td class="${w.free_tao ? "" : "zero"}">τ${taoStr(w.free_tao)}</td>` +
         `<td class="${w.staked_tao ? "" : "zero"}">τ${taoStr(w.staked_tao)}</td>` +
         `<td class="tag">${funded ? "⚑ yes" : "empty"}</td></tr>`;
