@@ -560,7 +560,9 @@ async def logo():
 
 @app.get("/", include_in_schema=False)
 async def index():
-    return FileResponse(STATIC_DIR / "index.html")
+    # no-cache: the browser may keep a copy but has to ask whether it is still
+    # current, so an updated dashboard shows up on the next load, not hours later.
+    return FileResponse(STATIC_DIR / "index.html", headers={"Cache-Control": "no-cache"})
 
 
 if __name__ == "__main__":
