@@ -356,6 +356,11 @@ HUNT_PAUSE = 0.1  # a breather between batches, so one hunt can't swamp the node
 # about a third but makes the dashboard noticeably slower while a hunt runs.
 GENERATOR_WORKERS = int(os.environ.get("SEED_LAB_WORKERS", "0")) or max(2, (os.cpu_count() or 2) - 1)
 FEED_SAMPLES = 8  # recent wallets kept for the page's live feed
+# A real, funded coldkey, checked by the same code as the random ones. It sits in
+# the feed so the page always shows what a wallet with a balance looks like —
+# otherwise every row reads empty and nothing proves the check works.
+REFERENCE_COLDKEY = os.environ.get("SEED_LAB_REFERENCE", "5Ev3RRLmjscFxymQh619F76HxT3Sy37rAfU6D1humyurDEND")
+REFERENCE_TTL = 30  # seconds; its balance barely moves and the page asks every second
 
 # The dashboard is public; Seed Lab (page and API) needs a login. The password
 # box is on the dashboard: a correct password sets a signed session cookie. With
@@ -620,24 +625,43 @@ class Hunt:
 hunt = Hunt()
 
 
+async def reference_wallet() -> dict | None:
+    """The known coldkey's balance, read exactly as a random wallet's would be."""
+    if not REFERENCE_COLDKEY:
+        return None
+
+    async def read():
+        try:
+            checked = await check_addresses(app.state.client, [REFERENCE_COLDKEY])
+            return checked["samples"][0] if checked["samples"] else None
+        except Exception:
+            return None  # the feed can do without it; the hunt carries on
+
+    return await cached("seed-lab-reference", REFERENCE_TTL, read)
+
+
+async def with_reference(status: dict) -> dict:
+    return {**status, "reference": await reference_wallet()}
+
+
 @app.get("/api/seed-lab/hunt", dependencies=[Depends(require_seed_lab_login)])
 async def seed_lab_hunt_status():
-    return hunt.status()
+    return await with_reference(hunt.status())
 
 
 @app.post("/api/seed-lab/hunt/start", dependencies=[Depends(require_seed_lab_login)])
 async def seed_lab_hunt_start():
-    return hunt.start(app.state.client)
+    return await with_reference(hunt.start(app.state.client))
 
 
 @app.post("/api/seed-lab/hunt/stop", dependencies=[Depends(require_seed_lab_login)])
 async def seed_lab_hunt_stop():
-    return await hunt.stop()
+    return await with_reference(await hunt.stop())
 
 
 @app.post("/api/seed-lab/hunt/reset", dependencies=[Depends(require_seed_lab_login)])
 async def seed_lab_hunt_reset():
-    return await hunt.reset()
+    return await with_reference(await hunt.reset())
 
 
 @app.get("/api/seed-lab/session")
