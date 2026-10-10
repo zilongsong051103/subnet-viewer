@@ -39,7 +39,7 @@ Then open http://127.0.0.1:8000.
 
 The dashboard and its API are public. Seed Lab (`/seed-lab` and its API) needs a password. Clicking **Seed Lab →** on the dashboard asks for it first, and opening `/seed-lab` directly without logging in sends you back to that password box. A login lasts 12 hours, or until **Log out** or a server restart.
 
-Seed Lab's hunt runs in the server, not the browser, so reloading or closing the page doesn't interrupt it and reopening shows it still going. It pauses between batches so it can't swamp the node the dashboard reads from, and a hunt no page has looked at for five minutes stops on its own.
+Seed Lab's hunt runs in the server, not the browser, so reloading or closing the page doesn't interrupt it and reopening shows it still going. Nobody has to be watching: a hunt runs until **Stop** is pressed or the server goes down. It pauses briefly between batches so it can't swamp the node the dashboard reads from.
 
 Wallets are made in worker processes, one core each, while the previous batch is still being checked on-chain, and a batch carries a thousand addresses because a round trip costs about the same whatever it carries. Together that runs at roughly 600 wallets a second here, against about 50 a second when the page did the work.
 

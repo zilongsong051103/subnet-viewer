@@ -355,7 +355,6 @@ HUNT_PAUSE = 0.1  # a breather between batches, so one hunt can't swamp the node
 # One core is left for the server itself: taking it too raises the hunt's rate by
 # about a third but makes the dashboard noticeably slower while a hunt runs.
 GENERATOR_WORKERS = int(os.environ.get("SEED_LAB_WORKERS", "0")) or max(2, (os.cpu_count() or 2) - 1)
-HUNT_IDLE_STOP = 300  # a hunt nobody is watching stops after this many seconds
 FEED_SAMPLES = 8  # recent wallets kept for the page's live feed
 
 # The dashboard is public; Seed Lab (page and API) needs a login. The password
@@ -543,9 +542,8 @@ class Hunt:
     """One hunt, running here rather than in a browser tab.
 
     The page only starts, stops and reads it, so reloading, closing or opening a
-    second tab changes nothing: the count carries on. A hunt that no page has
-    asked about for ``HUNT_IDLE_STOP`` seconds stops on its own, so a closed tab
-    doesn't leave the chain being queried forever.
+    second tab changes nothing: the count carries on. Nobody needs to be watching
+    either — a hunt runs until Stop is pressed or the server goes down.
     """
 
     def __init__(self):
@@ -556,7 +554,6 @@ class Hunt:
         self.hits: list[dict] = []
         self.samples: list[dict] = []
         self.error: str | None = None
-        self.last_seen = 0.0
 
     @property
     def running(self) -> bool:
@@ -566,7 +563,6 @@ class Hunt:
         return self.elapsed + (time.monotonic() - self.started_at if self.started_at else 0.0)
 
     def status(self) -> dict:
-        self.last_seen = time.monotonic()  # someone is watching
         return {
             "running": self.running,
             "tried": self.tried,
@@ -581,7 +577,6 @@ class Hunt:
         if not self.running:
             self.error = None
             self.started_at = time.monotonic()
-            self.last_seen = time.monotonic()
             self.task = asyncio.create_task(self._run(client))
         return self.status()
 
@@ -610,9 +605,6 @@ class Hunt:
                 self.tried += batch["tried"]
                 self.samples = (batch["samples"][::-1] + self.samples)[:FEED_SAMPLES]
                 self.hits.extend(batch["hits"])
-                if time.monotonic() - self.last_seen > HUNT_IDLE_STOP:
-                    self.error = "Stopped: no page was watching for a while"
-                    return
                 await asyncio.sleep(HUNT_PAUSE)
         except asyncio.CancelledError:
             raise
