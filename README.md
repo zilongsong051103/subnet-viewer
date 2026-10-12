@@ -34,12 +34,15 @@ Then open http://127.0.0.1:8000.
 | `SEED_LAB_PASSWORD` | (unset) | Password for Seed Lab. While unset, Seed Lab is switched off |
 | `SEED_LAB_BATCH` | `1000` | Wallets per chain round trip. Bigger is faster, and asks more of the node in one go |
 | `SEED_LAB_WORKERS` | cores − 1 | Processes generating wallets. Using every core is ~⅓ faster and slows the dashboard |
+| `SEED_LAB_TIMEOUT` | `30` | Seconds a batch's chain reads may take before being abandoned and retried |
 
 ## Access
 
 The dashboard and its API are public. Seed Lab (`/seed-lab` and its API) needs a password. Clicking **Seed Lab →** on the dashboard asks for it first, and opening `/seed-lab` directly without logging in sends you back to that password box. A login lasts 12 hours, or until **Log out** or a server restart.
 
 Seed Lab's hunt runs in the server, not the browser, so reloading or closing the page doesn't interrupt it and reopening shows it still going. Nobody has to be watching: a hunt runs until **Stop** is pressed or the server goes down. It pauses briefly between batches so it can't swamp the node the dashboard reads from.
+
+When the chain times out or rate-limits, the hunt waits rather than dying: it halves the batch, backs off for 2, 5, 15, 30 then 60 seconds, and says so on the page with a countdown. Once batches land again it grows back to full size. A read that hangs is abandoned after `SEED_LAB_TIMEOUT` seconds, so a wedged connection can't leave a hunt running on the spot.
 
 Wallets are made in worker processes, one core each, while the previous batch is still being checked on-chain, and a batch carries a thousand addresses because a round trip costs about the same whatever it carries. Together that runs at roughly 600 wallets a second here, against about 50 a second when the page did the work.
 

@@ -112,6 +112,7 @@
   .scoreboard.hit { border-color: var(--hit); background: var(--hit-soft); }
   .scoreboard.hit .score-num { color: var(--hit); }
   .score-error { margin: 6px 0 0; color: var(--bad); font-size: 14px; }
+  .score-error.waiting { color: var(--hit); } /* still hunting, just waiting out a sulking node */
 
   button.btn {
     font: inherit; color: var(--ink); background: var(--surface);
@@ -300,16 +301,27 @@
   async function sync(path = "/api/seed-lab/hunt", method = "GET") {
     try {
       run = await api(path, method);
-      $("error").hidden = !run.error;
-      if (run.error) $("error").textContent = run.error;
+      showTrouble();
       render();
     } catch (e) {
       if (e.message !== "login") showError(`Can't reach the hunt: ${e.message}`);
     }
   }
 
+  // An error while the hunt is still running is a wait, not a failure: the server
+  // backs off and tries again, so it reads as amber rather than red.
+  function showTrouble() {
+    const error = run.error;
+    $("error").hidden = !error;
+    if (!error) return;
+    const again = run.retry_in > 0 ? ` · trying again in ${Math.ceil(run.retry_in)}s` : "";
+    $("error").textContent = run.running ? `${error}${again}` : `Stopped: ${error}`;
+    $("error").classList.toggle("waiting", Boolean(run.running));
+  }
+
   function showError(message) {
     $("error").textContent = message; // textContent, not innerHTML: the text comes from the server
+    $("error").classList.remove("waiting");
     $("error").hidden = false;
   }
 

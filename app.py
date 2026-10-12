@@ -351,6 +351,11 @@ Keypair = sp_core.Keypair
 # so a big batch is worth far more than a fast loop: it is the same two reads.
 HUNT_BATCH = int(os.environ.get("SEED_LAB_BATCH", "1000"))
 HUNT_PAUSE = 0.1  # a breather between batches, so one hunt can't swamp the node the cards share
+# A node that stops answering must not leave a hunt hanging on a read forever.
+HUNT_TIMEOUT = float(os.environ.get("SEED_LAB_TIMEOUT", "30"))  # a slower batch than this is abandoned
+HUNT_MIN_BATCH = 50  # when the node pushes back, fall no lower than this
+HUNT_BACKOFF = (2, 5, 15, 30, 60)  # seconds to wait after each successive failure
+HUNT_REGROW_AFTER = 10  # clean batches before reaching for a bigger one again
 # Making a wallet is CPU-bound and holds the GIL, so threads don't help — these do.
 # One core is left for the server itself: taking it too raises the hunt's rate by
 # about a third but makes the dashboard noticeably slower while a hunt runs.
@@ -559,6 +564,10 @@ class Hunt:
         self.hits: list[dict] = []
         self.samples: list[dict] = []
         self.error: str | None = None
+        self.batch = HUNT_BATCH  # shrinks when the chain pushes back, grows back when it stops
+        self.failures = 0  # consecutive failed batches
+        self.clean = 0  # consecutive good ones, counted while the batch is below full size
+        self.retry_at: float | None = None  # set while waiting out a failure
 
     @property
     def running(self) -> bool:
@@ -575,6 +584,9 @@ class Hunt:
             "samples": self.samples,
             "hits": self.hits,
             "error": self.error,
+            "batch": self.batch,
+            "failures": self.failures,
+            "retry_in": max(0.0, self.retry_at - time.monotonic()) if self.retry_at else 0.0,
             "usage": usage.read(),  # hunting is the heaviest thing this app does
         }
 
@@ -589,32 +601,62 @@ class Hunt:
         task, self.task = self.task, None
         if task and not task.done():
             task.cancel()  # _run banks the elapsed time on its way out
-            with contextlib.suppress(asyncio.CancelledError):
-                await task
+            # Bounded: a read wedged inside the SDK must not hold up the answer.
+            with contextlib.suppress(asyncio.CancelledError, TimeoutError):
+                await asyncio.wait_for(asyncio.shield(task), 5)
         return self.status()
 
     async def reset(self) -> dict:
         await self.stop()
         self.elapsed, self.tried, self.hits, self.samples, self.error = 0.0, 0, [], [], None
+        self.batch, self.failures, self.clean, self.retry_at = HUNT_BATCH, 0, 0, None
         return self.status()
+
+    def _record(self, batch: dict) -> None:
+        self.tried += batch["tried"]
+        self.samples = (batch["samples"][::-1] + self.samples)[:FEED_SAMPLES]
+        self.hits.extend(batch["hits"])
+        self.failures, self.error, self.retry_at = 0, None, None
+        self.clean += 1
+        if self.batch < HUNT_BATCH and self.clean >= HUNT_REGROW_AFTER:
+            self.batch = min(HUNT_BATCH, self.batch * 2)  # the node is coping again; ask for more
+            self.clean = 0
+
+    async def _stumble(self, failure: Exception) -> None:
+        """A batch failed. Ask for less, wait a while, and keep the hunt alive."""
+        self.failures += 1
+        self.clean = 0
+        self.batch = max(HUNT_MIN_BATCH, self.batch // 2)
+        wait = HUNT_BACKOFF[min(self.failures, len(HUNT_BACKOFF)) - 1]
+        reason = "took too long" if isinstance(failure, TimeoutError) else f"{type(failure).__name__}: {failure}"
+        self.error = f"Chain read {reason} ({self.failures} in a row); batches of {self.batch} now"
+        self.retry_at = time.monotonic() + wait
+        try:
+            await asyncio.sleep(wait)
+        finally:
+            self.retry_at = None
 
     async def _run(self, client) -> None:
         # The next batch of wallets is made while the current one is being
         # checked, so neither the cores nor the chain connection sits idle.
-        upcoming = asyncio.create_task(make_addresses(HUNT_BATCH))
+        upcoming = asyncio.create_task(make_addresses(self.batch))
         try:
             while True:
                 addresses = await upcoming
-                upcoming = asyncio.create_task(make_addresses(HUNT_BATCH))
-                batch = await check_addresses(client, addresses)
-                self.tried += batch["tried"]
-                self.samples = (batch["samples"][::-1] + self.samples)[:FEED_SAMPLES]
-                self.hits.extend(batch["hits"])
+                upcoming = asyncio.create_task(make_addresses(self.batch))
+                try:
+                    # A read that hangs would leave the hunt "running" and going
+                    # nowhere, so it is given a deadline rather than forever.
+                    batch = await asyncio.wait_for(check_addresses(client, addresses), HUNT_TIMEOUT)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as failure:
+                    await self._stumble(failure)  # a rate limit is a wait, not the end of the hunt
+                    continue
+                self._record(batch)
                 await asyncio.sleep(HUNT_PAUSE)
         except asyncio.CancelledError:
             raise
-        except Exception as e:
-            self.error = f"Chain query failed: {type(e).__name__}: {e}"
         finally:
             upcoming.cancel()
             if self.started_at is not None:
