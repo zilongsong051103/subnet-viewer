@@ -278,6 +278,14 @@
   /* The table takes the card's leftover height, so the totals line lands at the bottom
      even when a subnet has fewer than five miners. */
   .table-wrap { overflow-x: auto; flex: 1; }
+  /* The week's alpha price, drawn faintly behind the card header (always there,
+     even for a subnet with no miners and so an empty table). */
+  .spark { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
+  .spark-line { fill: none; stroke: var(--ink-2); stroke-width: 1.5; opacity: 0.32; vector-effect: non-scaling-stroke; }
+  .spark-area { fill: var(--ink-2); opacity: 0.07; }
+  .spark.up .spark-line { stroke: var(--good); } .spark.up .spark-area { fill: var(--good); }
+  .spark.down .spark-line { stroke: var(--bad); } .spark.down .spark-area { fill: var(--bad); }
+  .bar > :not(.spark) { position: relative; }  /* header contents sit above the sparkline */
   table { width: 100%; height: 100%; border-collapse: collapse; font-size: 14px; line-height: 1.3; }
   /* A blank row swallows the spare height; the miner rows keep their own. */
   tr.filler { height: 100%; }
@@ -412,6 +420,10 @@
 <template id="card-template">
   <article class="card">
     <header class="bar">
+      <svg class="spark" data-field="spark" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true" hidden>
+        <path class="spark-area" data-field="spark-area"/>
+        <path class="spark-line" data-field="spark-line"/>
+      </svg>
       <button type="button" class="handle" data-field="handle"
               title="Drag to reorder, or click and use the arrow keys" aria-label="Reorder: use the arrow keys">⠿</button>
       <span class="logo" data-field="logo" aria-hidden="true">
@@ -883,6 +895,49 @@
     });
   });
 
+  // The 7-day price sparkline behind the table. Fetched once per card (its own
+  // long server cache), then drawn as a faint background; failure just hides it.
+  async function loadSpark(card) {
+    if (card.sparkDone) return;
+    card.sparkDone = true;
+    let history;
+    try {
+      history = (await getJSON(`/api/subnets/${card.netuid}/price-7d`)).history_7d;
+    } catch {
+      return; // the table reads fine without it
+    }
+    const svg = card.field("spark");
+    // On an SVG element, setting .hidden doesn't remove the attribute [hidden]
+    // matches, so toggle the attribute directly.
+    if (!history || history.length < 2) {
+      svg.setAttribute("hidden", "");
+      return;
+    }
+    const lo = Math.min(...history), hi = Math.max(...history);
+    const mid = (hi + lo) / 2;
+    // Floor the vertical scale at ±3% of the mid price, so a near-flat line
+    // (a subnet with little or no price movement) reads as flat instead of
+    // having its noise stretched to fill the table.
+    const half = Math.max((hi - lo) / 2, mid * 0.03) * 1.15; // 15% headroom
+    const x = (i) => (i / (history.length - 1)) * 100;
+    const y = (v) => 50 - ((v - mid) / (half || 1)) * 48;
+    const pts = history.map((v, i) => [x(i), y(v)]);
+    // A Catmull-Rom spline through the points, as cubic Béziers, so the line
+    // reads as a smooth curve rather than straight segments between samples.
+    let line = `M${pts[0][0].toFixed(2)},${pts[0][1].toFixed(2)}`;
+    for (let i = 0; i < pts.length - 1; i++) {
+      const p0 = pts[i - 1] || pts[i], p1 = pts[i], p2 = pts[i + 1], p3 = pts[i + 2] || pts[i + 1];
+      const c1x = p1[0] + (p2[0] - p0[0]) / 6, c1y = p1[1] + (p2[1] - p0[1]) / 6;
+      const c2x = p2[0] - (p3[0] - p1[0]) / 6, c2y = p2[1] - (p3[1] - p1[1]) / 6;
+      line += `C${c1x.toFixed(2)},${c1y.toFixed(2)} ${c2x.toFixed(2)},${c2y.toFixed(2)} ${p2[0].toFixed(2)},${p2[1].toFixed(2)}`;
+    }
+    card.field("spark-line").setAttribute("d", line);
+    card.field("spark-area").setAttribute("d", `M0,100L0,${pts[0][1].toFixed(2)}${line.slice(1)}L100,100Z`);
+    svg.classList.toggle("up", history[history.length - 1] >= history[0]);
+    svg.classList.toggle("down", history[history.length - 1] < history[0]);
+    svg.removeAttribute("hidden");
+  }
+
   async function load(card) {
     const seq = ++card.seq;
     card.el.classList.add("loading");
@@ -891,6 +946,7 @@
       if (seq !== card.seq) return;
       renderCard(card, data);
       card.field("error").hidden = true;
+      loadSpark(card);
     } catch (e) {
       if (seq !== card.seq) return;
       card.field("skeleton").hidden = true;

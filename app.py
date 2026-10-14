@@ -43,6 +43,12 @@ SUMMARY_TTL = 30  # seconds; the chain only changes every 12 s anyway
 SUBNET_LIST_TTL = 120  # the list carries prices now, so keep it fairly fresh
 OPTIONAL_READ_TIMEOUT = 20  # archive reads can be slow; don't hold the page hostage
 TOP_MINERS = 5
+PRICE_HISTORY_DAYS = 7
+PRICE_HISTORY_POINTS = 25  # ~every 6.7h; the archive node drops reads past ~30 in a burst
+PRICE_HISTORY_TTL = 1800  # 30 min: a week-long line barely moves intra-day, and each build is slow
+PRICE_HISTORY_CONCURRENCY = 6  # few at a time: the public archive drops bursts, so stay polite
+PRICE_HISTORY_READ_TIMEOUT = 20  # per attempt
+PRICE_HISTORY_RETRIES = 3  # the archive is flaky; retry a dropped point before giving up
 STATIC_DIR = Path(__file__).parent / "static"
 
 _cache: dict[object, tuple[float, object]] = {}
@@ -208,6 +214,47 @@ async def add_balances(head, miners: list[dict]) -> None:
         miner["balance_tao"] = free + staked if free is not None and staked is not None else None
 
 
+async def price_history(client, netuid: int) -> list[float]:
+    """Alpha price (TAO) sampled evenly over the last week, oldest first.
+
+    Each sample is an archive read; cold they cost ~15s all together, so this
+    is served from its own long cache and fetched by the page on its own, never
+    on the critical path of a card. Samples from before the subnet existed are
+    dropped, so a young subnet gets a shorter line.
+    """
+    now = await client.block()
+    head = await client.at(now)
+    graph = await head.runtime(SubnetInfoRuntimeApi.get_metagraph, [netuid])
+    if not isinstance(graph, dict):
+        raise HTTPException(404, f"Subnet {netuid} does not exist")
+    registered_at = graph["network_registered_at"]
+
+    span = PRICE_HISTORY_DAYS * BLOCKS_PER_DAY
+    step = span // (PRICE_HISTORY_POINTS - 1)
+    blocks = [b for b in (now - span + i * step for i in range(PRICE_HISTORY_POINTS)) if b >= registered_at]
+    if len(blocks) < 2:
+        return []
+
+    # The public archive drops reads when hit in bursts, so keep only a few in
+    # flight and retry a dropped point. A missing point just leaves a small gap.
+    gate = asyncio.Semaphore(PRICE_HISTORY_CONCURRENCY)
+
+    async def at(block: int):
+        async with gate:
+            for attempt in range(PRICE_HISTORY_RETRIES):
+                try:
+                    at_head = await client.at(block)
+                    got = await asyncio.wait_for(at_head.prices.alpha_price(netuid=netuid),
+                                                 PRICE_HISTORY_READ_TIMEOUT)
+                    return got["tao_per_alpha"]
+                except Exception:
+                    await asyncio.sleep(0.3 * (attempt + 1))
+            return None
+
+    prices = await asyncio.gather(*(at(b) for b in blocks))
+    return [pr for pr in prices if pr is not None]
+
+
 async def subnet_summary(client, netuid: int) -> dict:
     block = await client.block()
     head = await client.at(block)
@@ -363,6 +410,19 @@ async def get_subnets():
 async def get_subnet(netuid: int = PathParam(ge=1, le=65535)):
     try:
         return await cached(("subnet", netuid), SUMMARY_TTL, lambda: subnet_summary(app.state.client, netuid))
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise chain_error(e) from e
+
+
+@app.get("/api/subnets/{netuid}/price-7d")
+async def get_price_history(netuid: int = PathParam(ge=1, le=65535)):
+    """The week's alpha price for a card's sparkline. Slow to build, long cached."""
+    try:
+        history = await cached(("price7d", netuid), PRICE_HISTORY_TTL,
+                               lambda: price_history(app.state.client, netuid))
+        return {"netuid": netuid, "history_7d": history}
     except HTTPException:
         raise
     except Exception as e:
