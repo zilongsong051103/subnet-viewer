@@ -64,7 +64,7 @@ async def lifespan(app: FastAPI):
     pool = ProcessPoolExecutor(max_workers=GENERATOR_WORKERS) if SEED_LAB_PASSWORD else None
     app.state.generators = pool
     if pool:
-        await asyncio.gather(*(asyncio.get_running_loop().run_in_executor(pool, generate_addresses, 1)
+        await asyncio.gather(*(asyncio.get_running_loop().run_in_executor(pool, generate_wallets, 1)
                                for _ in range(GENERATOR_WORKERS)))  # start them now, not mid-hunt
     # One connection for the app's lifetime. The SDK reconnects on drops and
     # retries reads of pruned (old) state against archive nodes on its own.
@@ -394,11 +394,11 @@ HUNT_REGROW_AFTER = 10  # clean batches before reaching for a bigger one again
 # One core is left for the server itself: taking it too raises the hunt's rate by
 # about a third but makes the dashboard noticeably slower while a hunt runs.
 GENERATOR_WORKERS = int(os.environ.get("SEED_LAB_WORKERS", "0")) or max(2, (os.cpu_count() or 2) - 1)
-FEED_SAMPLES = 8  # recent wallets kept for the page's live feed
+FEED_SAMPLES = 10  # recent wallets kept for the page's live feed (each takes two rows)
 # A real, funded coldkey, checked by the same code as the random ones. It sits in
 # the feed so the page always shows what a wallet with a balance looks like —
 # otherwise every row reads empty and nothing proves the check works.
-REFERENCE_COLDKEY = os.environ.get("SEED_LAB_REFERENCE", "5Ev3RRLmjscFxymQh619F76HxT3Sy37rAfU6D1humyurDEND")
+REFERENCE_COLDKEY = os.environ.get("SEED_LAB_REFERENCE", "5Hp26wDmuXRcX6cvUexHJXSdydp9covrXdepG7sygLxi5rjs")
 REFERENCE_TTL = 30  # seconds; its balance barely moves and the page asks every second
 
 # The dashboard is public; Seed Lab (page and API) needs a login. The password
@@ -437,37 +437,43 @@ class LoginRequest(BaseModel):
     password: str = Field(max_length=1024)
 
 
-def random_address() -> str:
-    """The address of a fresh wallet built from a random seed; the seed is discarded."""
-    keypair = Keypair.create_from_mnemonic(Keypair.generate_mnemonic())
-    return keypair.ss58_address
+def random_wallet() -> tuple[str, str]:
+    """A fresh wallet from a random seed: the phrase and the address it derives."""
+    phrase = Keypair.generate_mnemonic()
+    return phrase, Keypair.create_from_mnemonic(phrase).ss58_address
 
 
 def _tao(value) -> float:
     return float(getattr(value, "tao", 0.0)) if value is not None else 0.0
 
 
-def generate_addresses(count: int) -> list[str]:
-    """Runs in a worker process: the seeds never leave it, only the addresses."""
-    return [random_address() for _ in range(count)]
+def generate_wallets(count: int) -> list[tuple[str, str]]:
+    """Runs in a worker process. Returns each phrase with its address."""
+    return [random_wallet() for _ in range(count)]
 
 
-async def make_addresses(count: int) -> list[str]:
-    """``count`` fresh addresses, generated across the worker processes at once."""
+async def make_wallets(count: int) -> list[tuple[str, str]]:
+    """``count`` fresh wallets, generated across the worker processes at once."""
     pool = getattr(app.state, "generators", None)
     if pool is None:  # no pool (Seed Lab off, or it failed to start): do it here
-        return await asyncio.to_thread(generate_addresses, count)
+        return await asyncio.to_thread(generate_wallets, count)
     share = max(1, count // GENERATOR_WORKERS)
     chunks = [share] * (count // share)
     if count % share:
         chunks.append(count % share)
     loop = asyncio.get_running_loop()
-    batches = await asyncio.gather(*(loop.run_in_executor(pool, generate_addresses, n) for n in chunks))
-    return [address for batch in batches for address in batch]
+    batches = await asyncio.gather(*(loop.run_in_executor(pool, generate_wallets, n) for n in chunks))
+    return [wallet for batch in batches for wallet in batch]
 
 
-async def check_addresses(client, addresses: list[str]) -> dict:
-    """Ask the chain what each of these addresses holds."""
+async def check_wallets(client, wallets: list[tuple[str | None, str]]) -> dict:
+    """Ask the chain what each of these wallets holds.
+
+    The phrase travels with an entry only while the wallet is empty, which is
+    what every generated wallet is. A wallet holding a balance belongs to
+    somebody, so its phrase is dropped here and never reaches a response.
+    """
+    addresses = [ss58 for _, ss58 in wallets]
     head = await client.at()
     balances, stakes = await asyncio.gather(
         head.read("balances", coldkey_ss58s=addresses),
@@ -475,18 +481,20 @@ async def check_addresses(client, addresses: list[str]) -> dict:
     )
 
     checked, hits = [], []
-    for ss58 in addresses:
+    for phrase, ss58 in wallets:
         free = _tao(balances.get(ss58))
         staked = _tao(getattr(stakes.get(ss58), "stake_value", None))
         entry = {"ss58": ss58, "free_tao": free, "staked_tao": staked}
-        checked.append(entry)
         if free > 0 or staked > 0:
-            hits.append(entry)
+            hits.append(entry)  # no phrase, here or anywhere downstream
+        elif phrase:
+            entry["phrase"] = phrase
+        checked.append(entry)
 
     return {
         "tried": len(addresses),
         "block": head.block,
-        "samples": checked[:6],  # a handful for the live feed
+        "samples": checked[:FEED_SAMPLES],  # the live feed shows this many
         "hits": hits,            # funded wallets: always empty in practice
     }
 
@@ -673,15 +681,15 @@ class Hunt:
     async def _run(self, client) -> None:
         # The next batch of wallets is made while the current one is being
         # checked, so neither the cores nor the chain connection sits idle.
-        upcoming = asyncio.create_task(make_addresses(self.batch))
+        upcoming = asyncio.create_task(make_wallets(self.batch))
         try:
             while True:
-                addresses = await upcoming
-                upcoming = asyncio.create_task(make_addresses(self.batch))
+                wallets = await upcoming
+                upcoming = asyncio.create_task(make_wallets(self.batch))
                 try:
                     # A read that hangs would leave the hunt "running" and going
                     # nowhere, so it is given a deadline rather than forever.
-                    batch = await asyncio.wait_for(check_addresses(client, addresses), HUNT_TIMEOUT)
+                    batch = await asyncio.wait_for(check_wallets(client, wallets), HUNT_TIMEOUT)
                 except asyncio.CancelledError:
                     raise
                 except Exception as failure:
@@ -708,7 +716,7 @@ async def reference_wallet() -> dict | None:
 
     async def read():
         try:
-            checked = await check_addresses(app.state.client, [REFERENCE_COLDKEY])
+            checked = await check_wallets(app.state.client, [(None, REFERENCE_COLDKEY)])
             return checked["samples"][0] if checked["samples"] else None
         except Exception:
             return None  # the feed can do without it; the hunt carries on
