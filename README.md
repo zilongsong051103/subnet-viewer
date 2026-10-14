@@ -67,8 +67,8 @@ If the app is reachable beyond your own machine, put it behind HTTPS (for exampl
 
 - **24h change**: compared with the chain state 7,200 blocks (about 24h) earlier, read from an archive node.
 - **Burn**: the chain's `MinerBurned` value, the share of the last epoch's miner emission that went to the subnet owner's hotkeys (burned or recycled).
-- **Daily emission**: a miner's emission in the last epoch × epochs per day, valued at the current alpha price. Owner hotkeys are excluded.
-- **Share**: a miner's part of all miner emission, burned part included, so miner shares plus burn add up to about 100%.
+- **Daily emission**: what a miner earns a day at its current weights — its `consensus` share of the subnet's alpha emission, less the owner's cut (read from the chain, currently 18%) and the validators' half, valued at the current alpha price. This is the basis Taostats shows. Each cell's tooltip also gives what the chain last recorded paying, from the per-neuron `emission` field; the two agree on a healthy subnet and part company on one emitting below its entitlement, as SN68 does.
+- **Incentive**: a miner's `consensus` as a share of every miner's, burned part included. The chain's own `incentive` field can be degenerate — SN68 has one miner at full scale and another at zero while both earn — so consensus is used instead.
 - **Owner balance**: free TAO plus all stake valued in TAO (the same "total balance" Taostats shows). **Lock** is the owner's locked stake on that subnet, valued in TAO.
 
 ## Notes

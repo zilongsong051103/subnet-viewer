@@ -20,7 +20,6 @@ import hmac
 import os
 import re
 import secrets
-import statistics
 import time
 from concurrent.futures import ProcessPoolExecutor
 from contextlib import asynccontextmanager
@@ -126,45 +125,43 @@ async def nothing():
     return None
 
 
-def rank_miners(graph: dict, price: float) -> list[dict]:
-    """Every miner's estimated daily emission, highest first, valued in TAO.
+def rank_miners(graph: dict, price: float, owner_cut: float) -> list[dict]:
+    """Every miner's daily emission, highest first, valued in TAO.
 
-    A neuron's ``emission`` is the alpha (in rao) it earned in the last epoch:
-    miner incentive plus validator dividends. Every validator earns the same
-    alpha per unit of ``dividends``, so that rate, measured on neurons with no
-    incentive, strips the dividend part out of neurons that do both. Incentive
-    sent to the subnet owner's hotkeys is burned by the chain; those entries are
-    marked ``burned``.
+    A miner earns its share of the pool the chain sets aside for miners: the
+    subnet's alpha emission less the owner's cut, halved with the validators,
+    divided by ``consensus`` — the clipped weight ranking. That is the basis
+    Taostats shows, and it is what a miner earns at its current weights.
+
+    Each entry also carries ``recorded_daily_alpha``: the same figure taken from
+    the chain's per-neuron ``emission``, which is what it was last paid. The two
+    agree on a healthy subnet and part company on one emitting below its
+    entitlement. Miners are the neurons the chain ranks (consensus above zero);
+    validators earn through ``dividends`` and are left out. Incentive sent to the
+    owner's own hotkeys is burned, and those entries are marked ``burned``.
     """
     hotkeys, coldkeys = graph["hotkeys"], graph["coldkeys"]
-    emission, incentive, dividends = graph["emission"], graph["incentives"], graph["dividends"]
+    emission, consensus = graph["emission"], graph["consensus"]
 
     # Same set the chain burns for: the owner hotkey plus every hotkey the
     # owner coldkey has registered on the subnet.
     owner_hotkeys = {graph["owner_hotkey"]}
     owner_hotkeys.update(hk for hk, ck in zip(hotkeys, coldkeys) if ck == graph["owner_coldkey"])
 
-    rates = [e / d for e, i, d in zip(emission, incentive, dividends) if d > 0 and i == 0]
-    alpha_per_dividend = statistics.median(rates) if rates else None
+    # The miners' pool: a day of alpha emission, less the owner's cut, split with
+    # the validators. Shared out by consensus, this is each miner's entitlement.
+    pool_alpha = graph["alpha_out_emission"] / RAO_PER_UNIT * BLOCKS_PER_DAY * (1 - owner_cut) / 2
+    total_consensus = sum(consensus)
 
     epochs_per_day = BLOCKS_PER_DAY / (graph["tempo"] + 1)
     # A newly registered neuron can't be deregistered until its immunity period ends.
     immunity_ends = [reg + graph["immunity_period"] for reg in graph["block_at_registration"]]
     miners = []
-    for uid, (hotkey, coldkey, em, inc, div) in enumerate(zip(hotkeys, coldkeys, emission, incentive, dividends)):
-        if em == 0:
+    for uid, (hotkey, coldkey, em, cons) in enumerate(zip(hotkeys, coldkeys, emission, consensus)):
+        if cons == 0:  # not a ranked miner: a validator, or a slot earning nothing
             continue
-        if div == 0:
-            mined = em
-        elif inc == 0 or alpha_per_dividend is None:
-            # A validator only. Dividends are coarsely rounded on chain, so
-            # subtracting them would leave a fake sliver of "mined" alpha.
-            continue
-        else:
-            mined = max(0, em - alpha_per_dividend * div)
-            if mined == 0:
-                continue
-        daily_alpha = mined * epochs_per_day / RAO_PER_UNIT
+        daily_alpha = cons / total_consensus * pool_alpha if total_consensus else 0.0
+        recorded_alpha = em * epochs_per_day / RAO_PER_UNIT
         miners.append(
             {
                 "uid": uid,
@@ -172,12 +169,43 @@ def rank_miners(graph: dict, price: float) -> list[dict]:
                 "coldkey": coldkey,
                 "daily_alpha": daily_alpha,
                 "daily_tao": daily_alpha * price,
+                # What the chain last paid, for comparison: below the entitlement
+                # when a subnet is emitting less than its full share.
+                "recorded_daily_alpha": recorded_alpha,
+                "recorded_daily_tao": recorded_alpha * price,
                 "burned": hotkey in owner_hotkeys,
+                "consensus": cons,
                 "immune_blocks_left": max(0, immunity_ends[uid] - graph["block"]),
+                # Blocks since this hotkey registered. The chain keeps no record of
+                # when a miner first earned, so this is registration age, nothing more.
+                "age_blocks": max(0, graph["block"] - graph["block_at_registration"][uid]),
             }
         )
     miners.sort(key=lambda m: m["daily_alpha"], reverse=True)
     return miners
+
+
+async def add_balances(head, miners: list[dict]) -> None:
+    """Fill in each miner's coldkey balance: free TAO plus all stake valued in TAO.
+
+    Two batched reads for the handful of coldkeys on show, and the card can do
+    without them, so a slow or failing read leaves the figures as None.
+    """
+    coldkeys = list(dict.fromkeys(miner["coldkey"] for miner in miners))  # a coldkey can hold several slots
+    if not coldkeys:
+        return
+    balances, stakes = await asyncio.gather(
+        optional(head.read("balances", coldkey_ss58s=coldkeys)),
+        optional(head.read("stake_value_for_coldkeys", coldkey_ss58s=coldkeys)),
+    )
+    for miner in miners:
+        balance = balances.get(miner["coldkey"]) if balances else None
+        valuation = stakes.get(miner["coldkey"]) if stakes else None
+        free = balance.tao if balance is not None else None
+        staked = valuation.stake_value.tao if valuation is not None else None
+        miner["free_tao"] = free
+        miner["staked_tao"] = staked
+        miner["balance_tao"] = free + staked if free is not None and staked is not None else None
 
 
 async def subnet_summary(client, netuid: int) -> dict:
@@ -195,7 +223,7 @@ async def subnet_summary(client, netuid: int) -> dict:
 
     owner_coldkey = graph["owner_coldkey"]
     (
-        price, fee, burned, burn_mode, network_immunity,
+        price, fee, burned, burn_mode, network_immunity, owner_cut,
         owner_balance, owner_stake, owner_stake_value, price_then, fee_then,
     ) = await asyncio.gather(
         head.prices.alpha_price(netuid=netuid),
@@ -203,6 +231,7 @@ async def subnet_summary(client, netuid: int) -> dict:
         head.query(storage.SubtensorModule.MinerBurned, [netuid]),
         head.query(storage.SubtensorModule.RecycleOrBurn, [netuid]),
         head.query(storage.SubtensorModule.NetworkImmunityPeriod),
+        head.query(storage.SubtensorModule.SubnetOwnerCut),  # 18%, read rather than assumed
         optional(head.read("balance", coldkey_ss58=owner_coldkey)),
         # The owner's stake on this subnet: total, and how much of it is locked.
         optional(head.read("stake_availability", coldkey_ss58=owner_coldkey, netuid=netuid)),
@@ -216,8 +245,9 @@ async def subnet_summary(client, netuid: int) -> dict:
     price_then_tao = price_then["tao_per_alpha"] if price_then else None
     fee_then_tao = fee_then.tao if fee_then is not None else None
     burned_bits = burned.get("bits") if isinstance(burned, dict) else burned
-    miners = rank_miners(graph, price_tao)
+    miners = rank_miners(graph, price_tao, int(owner_cut) / 65535)
     paid = [m for m in miners if not m["burned"]]
+    await add_balances(head, paid[:TOP_MINERS])
     identity = graph.get("identity") if isinstance(graph.get("identity"), dict) else {}
     locked_alpha = owner_stake["locked"].rao / RAO_PER_UNIT if owner_stake else None
     free_tao = owner_balance.tao if owner_balance is not None else None
@@ -262,6 +292,9 @@ async def subnet_summary(client, netuid: int) -> dict:
             # All miner emission per day, as if nothing were burned.
             "full_daily_alpha": sum(m["daily_alpha"] for m in miners),
             "full_daily_tao": sum(m["daily_tao"] for m in miners),
+            "full_recorded_daily_tao": sum(m["recorded_daily_tao"] for m in miners),
+            # The same whole for incentive: every miner's consensus, burned ones included.
+            "full_consensus": sum(m["consensus"] for m in miners),
         },
         "owner": {
             "coldkey": owner_coldkey,
@@ -280,6 +313,7 @@ async def subnet_summary(client, netuid: int) -> dict:
             "count": len(paid),
             "daily_alpha": sum(m["daily_alpha"] for m in paid),
             "daily_tao": sum(m["daily_tao"] for m in paid),
+            "consensus": sum(m["consensus"] for m in paid),
         },
     }
 
