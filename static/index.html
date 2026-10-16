@@ -261,7 +261,7 @@
 
   /* Price, reg fee and burn: three equal groups, each marked by a bar on its left. */
   .stats {
-    display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px;
+    display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 12px;
     margin-block: 0 16px; padding-block: 14px 0;
   }
   .stat { display: flex; flex-direction: column; min-width: 0; padding-left: 10px; border-left: 3px solid var(--rule); }
@@ -492,6 +492,10 @@
         <div class="stat" data-field="emission-stat">
           <span class="stat-label">Emission</span>
           <span class="stat-line"><span class="stat-value" data-field="emission"></span><span class="delta" data-field="emission-day"></span></span>
+        </div>
+        <div class="stat" data-field="pool-stat">
+          <span class="stat-label">Pool</span>
+          <span class="stat-line"><span class="stat-value" data-field="pool"></span><span class="delta" data-field="pool-alpha"></span></span>
         </div>
       </div>
       <div class="table-wrap" data-field="table">
@@ -807,6 +811,13 @@
     showListStats(card);
     f("fee").textContent = tao(d.registration_fee.tao);
     setDelta(f("fee-delta"), d.registration_fee, null);
+
+    // Subnet pool: the AMM reserves, in k/M units. TAO depth as the value, alpha beneath.
+    f("pool").textContent = `${kNum(d.pool.tao)} τ`;
+    f("pool-alpha").textContent = `${kNum(d.pool.alpha)} ${sym(d.symbol)}`;
+    f("pool-stat").title =
+      `Liquidity pool: ${num(d.pool.tao)} τ and ${num(d.pool.alpha)} ${sym(d.symbol)}.\n` +
+      `Their ratio is the alpha price (τ${num(d.alpha_price.tao)}).`;
 
     const emitting = d.alpha_emission_per_block > 0;
     const pct = emitting ? d.miner_burn.pct : null;

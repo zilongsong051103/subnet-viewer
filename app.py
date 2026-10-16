@@ -354,6 +354,11 @@ async def subnet_summary(client, netuid: int) -> dict:
             "tao_24h_ago": fee_then_tao,
             "change_pct": pct_change(fee.tao, fee_then_tao),
         },
+        # The subnet's AMM pool reserves: TAO in, alpha in (price = tao / alpha).
+        "pool": {
+            "tao": graph["tao_in"] / RAO_PER_UNIT,
+            "alpha": graph["alpha_in"] / RAO_PER_UNIT,
+        },
         "miner_burn": {
             "pct": burned_bits / FIXED_ONE * 100 if burned_bits is not None else None,
             # Unset means the chain's default, which burns.
