@@ -49,6 +49,7 @@ PRICE_HISTORY_TTL = 1800  # 30 min: a week-long line barely moves intra-day, and
 PRICE_HISTORY_CONCURRENCY = 6  # few at a time: the public archive drops bursts, so stay polite
 PRICE_HISTORY_READ_TIMEOUT = 20  # per attempt
 PRICE_HISTORY_RETRIES = 3  # the archive is flaky; retry a dropped point before giving up
+PRICE_HISTORY_WARM_INTERVAL = 1200  # 20 min: rebuild the shared history before its cache expires
 STATIC_DIR = Path(__file__).parent / "static"
 
 _cache: dict[object, tuple[float, object]] = {}
@@ -76,9 +77,11 @@ async def lifespan(app: FastAPI):
     # retries reads of pruned (old) state against archive nodes on its own.
     async with bt.Subtensor(NETWORK) as client:
         app.state.client = client
+        warmer = asyncio.create_task(warm_price_history(client))  # keep the 7-day graphs ready
         try:
             yield
         finally:
+            warmer.cancel()
             await hunt.stop()  # don't leave a hunt holding the connection open
             if pool:
                 pool.shutdown(wait=False, cancel_futures=True)
@@ -214,45 +217,64 @@ async def add_balances(head, miners: list[dict]) -> None:
         miner["balance_tao"] = free + staked if free is not None and staked is not None else None
 
 
-async def price_history(client, netuid: int) -> list[float]:
-    """Alpha price (TAO) sampled evenly over the last week, oldest first.
+async def build_price_history_all(client) -> dict[int, list[float]]:
+    """Every subnet's alpha price over the last week, oldest sample first.
 
-    Each sample is an archive read; cold they cost ~15s all together, so this
-    is served from its own long cache and fetched by the page on its own, never
-    on the critical path of a card. Samples from before the subnet existed are
-    dropped, so a young subnet gets a shorter line.
+    One ``get_all_dynamic_info`` call returns the pool reserves of every subnet,
+    so sampling it at a couple of dozen past blocks gives the whole dashboard's
+    price history in one sweep — ~25 archive reads total, not per subnet. Price
+    is tao_in / alpha_in, the same spot price a card shows. Dropped reads just
+    thin the series; a subnet absent at an old block (not yet registered) simply
+    starts later.
     """
     now = await client.block()
-    head = await client.at(now)
-    graph = await head.runtime(SubnetInfoRuntimeApi.get_metagraph, [netuid])
-    if not isinstance(graph, dict):
-        raise HTTPException(404, f"Subnet {netuid} does not exist")
-    registered_at = graph["network_registered_at"]
-
     span = PRICE_HISTORY_DAYS * BLOCKS_PER_DAY
     step = span // (PRICE_HISTORY_POINTS - 1)
-    blocks = [b for b in (now - span + i * step for i in range(PRICE_HISTORY_POINTS)) if b >= registered_at]
-    if len(blocks) < 2:
-        return []
+    blocks = [now - span + i * step for i in range(PRICE_HISTORY_POINTS)]
 
-    # The public archive drops reads when hit in bursts, so keep only a few in
-    # flight and retry a dropped point. A missing point just leaves a small gap.
     gate = asyncio.Semaphore(PRICE_HISTORY_CONCURRENCY)
 
-    async def at(block: int):
+    async def sweep(block: int):
         async with gate:
             for attempt in range(PRICE_HISTORY_RETRIES):
                 try:
-                    at_head = await client.at(block)
-                    got = await asyncio.wait_for(at_head.prices.alpha_price(netuid=netuid),
-                                                 PRICE_HISTORY_READ_TIMEOUT)
-                    return got["tao_per_alpha"]
+                    head = await client.at(block)
+                    infos = await asyncio.wait_for(
+                        head.runtime(SubnetInfoRuntimeApi.get_all_dynamic_info, []),
+                        PRICE_HISTORY_READ_TIMEOUT)
+                    return {info["netuid"]: info["tao_in"] / info["alpha_in"]
+                            for info in infos if info and info.get("alpha_in")}
                 except Exception:
                     await asyncio.sleep(0.3 * (attempt + 1))
             return None
 
-    prices = await asyncio.gather(*(at(b) for b in blocks))
-    return [pr for pr in prices if pr is not None]
+    sweeps = [s for s in await asyncio.gather(*(sweep(b) for b in blocks)) if s]
+    history: dict[int, list[float]] = {}
+    for snapshot in sweeps:  # already oldest-first
+        for netuid, price in snapshot.items():
+            history.setdefault(netuid, []).append(price)
+    return history
+
+
+async def price_history_all(client) -> dict[int, list[float]]:
+    return await cached(("price7d_all",), PRICE_HISTORY_TTL,
+                        lambda: build_price_history_all(client))
+
+
+async def price_history(client, netuid: int) -> list[float]:
+    """One subnet's week of alpha price, from the shared all-subnet sweep."""
+    return (await price_history_all(client)).get(netuid, [])
+
+
+async def warm_price_history(client) -> None:
+    """Keep the shared history fresh so a card never waits on the slow sweep."""
+    while True:
+        try:
+            data = await build_price_history_all(client)
+            _cache[("price7d_all",)] = (time.monotonic() + PRICE_HISTORY_TTL, data)
+        except Exception:
+            pass  # try again next interval; the endpoint still builds on demand
+        await asyncio.sleep(PRICE_HISTORY_WARM_INTERVAL)
 
 
 async def subnet_summary(client, netuid: int) -> dict:
