@@ -32,6 +32,11 @@
     --accent: #1976d2;
     --accent-soft: rgba(25, 118, 210, 0.08);
     --immune: #ed6c02;
+    /* Emission-split bar: owner / vali-root / vali-alpha / miner. Distinct hues, validated for CVD. */
+    --split-owner: #c9a200;
+    --split-vroot: #0ca678;
+    --split-valpha: #e03131;
+    --split-miner: #2563eb;
     --logo-bg: #ffffff;
     --shadow-1: 0 2px 1px -1px rgba(0, 0, 0, 0.2), 0 1px 1px rgba(0, 0, 0, 0.14), 0 1px 3px rgba(0, 0, 0, 0.12);
     --shadow-8: 0 5px 5px -3px rgba(0, 0, 0, 0.2), 0 8px 10px 1px rgba(0, 0, 0, 0.14), 0 3px 14px 2px rgba(0, 0, 0, 0.12);
@@ -57,6 +62,10 @@
       --accent: #90caf9;
       --accent-soft: rgba(144, 202, 249, 0.12);
       --immune: #ffa726;
+      --split-owner: #f5c518;
+      --split-vroot: #20c997;
+      --split-valpha: #fa5252;
+      --split-miner: #4c8dff;
       --logo-bg: #e0e0e0;
       --shadow-1: 0 2px 1px -1px rgba(0, 0, 0, 0.4), 0 1px 1px rgba(0, 0, 0, 0.28), 0 1px 3px rgba(0, 0, 0, 0.24);
       --shadow-8: 0 5px 5px -3px rgba(0, 0, 0, 0.4), 0 8px 10px 1px rgba(0, 0, 0, 0.28), 0 3px 14px 2px rgba(0, 0, 0, 0.24);
@@ -81,6 +90,10 @@
     --accent: #90caf9;
     --accent-soft: rgba(144, 202, 249, 0.12);
     --immune: #ffa726;
+    --split-owner: #f5c518;
+    --split-vroot: #20c997;
+    --split-valpha: #fa5252;
+    --split-miner: #4c8dff;
     --logo-bg: #e0e0e0;
     --shadow-1: 0 2px 1px -1px rgba(0, 0, 0, 0.4), 0 1px 1px rgba(0, 0, 0, 0.28), 0 1px 3px rgba(0, 0, 0, 0.24);
     --shadow-8: 0 5px 5px -3px rgba(0, 0, 0, 0.4), 0 8px 10px 1px rgba(0, 0, 0, 0.28), 0 3px 14px 2px rgba(0, 0, 0, 0.24);
@@ -301,6 +314,23 @@
   th { color: var(--ink-2); font-weight: 500; font-size: 12px; letter-spacing: 0.01em; }
   /* Totals may wrap after the slash on narrow screens instead of overflowing. */
   tfoot td { border-top: 1px solid var(--divider); border-bottom: 0; padding-top: 8px; font-weight: 500; white-space: normal; }
+  /* Totals row: "Top N / All M" on the left, then the emission-split bar with its
+     labels aligned beneath, filling the gap before the share / Daily-TAO columns. */
+  tfoot td { vertical-align: top; }
+  .total-main { display: flex; align-items: flex-start; gap: 14px; }
+  .total-main .tl-text { flex: none; white-space: nowrap; padding-top: 1px; }
+  .esplit { flex: 1; min-width: 0; }
+  .esplit-bar { display: flex; gap: 3px; height: 9px; margin-bottom: 6px; }
+  .esplit-bar .seg { border-radius: 3px; min-width: 3px; }
+  .esplit-legend { display: flex; justify-content: space-between; gap: 6px; }
+  .esplit-legend .li { display: flex; flex-direction: column; gap: 1px; min-width: 0; font-weight: 400; }
+  .esplit-legend .li .name { display: flex; align-items: center; gap: 4px; font-size: 10px; color: var(--ink); white-space: nowrap; }
+  .esplit-legend .li .name i { width: 7px; height: 7px; border-radius: 50%; flex: none; }
+  .esplit-legend .li .pct { font-size: 10px; color: var(--ink-2); padding-left: 11px; }
+  .seg-owner { background: var(--split-owner); }
+  .seg-vroot { background: var(--split-vroot); }
+  .seg-valpha { background: var(--split-valpha); }
+  .seg-miner { background: var(--split-miner); }
   .muted { color: var(--ink-2); font-weight: 400; }
   .num { text-align: right; font-variant-numeric: tabular-nums; }
   .age { color: var(--ink-2); cursor: help; }
@@ -481,7 +511,7 @@
           <span class="stat-label">Price <span class="rank" data-field="price-rank" hidden></span></span>
           <span class="stat-line"><span class="stat-value" data-field="price"></span><span class="delta" data-field="price-delta"></span></span>
         </div>
-        <div class="stat">
+        <div class="stat" data-field="fee-stat">
           <span class="stat-label">Reg fee</span>
           <span class="stat-line"><span class="stat-value" data-field="fee"></span><span class="delta" data-field="fee-delta"></span></span>
         </div>
@@ -508,7 +538,7 @@
               <th scope="col" class="num" title="What the coldkey holds in total: free TAO plus all its stake valued in TAO">Balance</th>
               <th scope="col" class="num" title="How long ago this hotkey registered on the subnet. Not the same as how long it has been earning, which the chain does not record">Registered</th>
               <th scope="col" class="num" title="Each miner's share of the subnet's incentive, from the chain's consensus ranking — the figure Taostats shows. Hover a cell for its share of emission instead">Incentive</th>
-              <th scope="col" class="num" title="What this miner earns a day at its current weights: its share of the subnet's alpha emission, less the owner's 18% cut and the validators' half. Hover a cell to see what the chain last recorded paying">Daily TAO</th>
+              <th scope="col" class="num" title="What this miner earns a day at its current weights: its share of the miners' slice of the subnet's alpha emission (the split read live from the chain, shown below the table). Hover a cell to see what the chain last recorded paying">Daily TAO</th>
             </tr>
           </thead>
           <tbody data-field="miners"></tbody>
@@ -809,8 +839,17 @@
     f("price").textContent = tao(d.alpha_price.tao);
     setDelta(f("price-delta"), d.alpha_price, true);
     showListStats(card);
-    f("fee").textContent = tao(d.registration_fee.tao);
-    setDelta(f("fee-delta"), d.registration_fee, null);
+    const regfee = d.registration_fee;
+    f("fee").textContent = tao(regfee.tao);
+    // The registration burn range, not a 24h change: min to max burn cost.
+    const feeDelta = f("fee-delta");
+    feeDelta.className = "delta"; // plain, no up/down colour
+    feeDelta.textContent =
+      regfee.min_tao == null || regfee.max_tao == null ? "" : `${tao(regfee.min_tao)}–${tao(regfee.max_tao)}`;
+    f("fee-stat").title = regfee.min_tao == null
+      ? ""
+      : `Registration burn: currently ${tao(regfee.tao)}, adjusts with demand ` +
+        `between ${tao(regfee.min_tao)} (min) and ${tao(regfee.max_tao)} (max).`;
 
     // Subnet pool: the AMM reserves, in k/M units. TAO depth as the value, alpha beneath.
     f("pool").textContent = `${kNum(d.pool.tao)} τ`;
@@ -868,10 +907,68 @@
       muted.textContent = ` / ${rest}`;
       f(field).replaceChildren(lead, muted);
     };
-    pair("total-label", `Top ${d.top_miners.length}`, `All ${totals.count}`);
     const topConsensus = d.top_miners.reduce((sum, m) => sum + m.consensus, 0);
     pair("total-share", share(topConsensus, fullConsensus), share(totals.consensus, fullConsensus));
     pair("total-tao", `τ${topTao.toFixed(2)}`, `τ${totals.daily_tao.toFixed(2)}`);
+
+    // "Top N / All M", set beside the emission-split bar in the same (wide) cell.
+    const labelText = document.createElement("span");
+    labelText.className = "tl-text";
+    labelText.append(`Top ${d.top_miners.length}`);
+    const labelMuted = document.createElement("span");
+    labelMuted.className = "muted";
+    labelMuted.textContent = ` / All ${totals.count}`;
+    labelText.append(labelMuted);
+
+    // The subnet's live emission split, read from the chain: a segmented bar
+    // (owner / vali-root / vali-alpha / miner) between the label and the share
+    // column, with each label aligned beneath its segment's part of the bar.
+    const es = d.emission_split;
+    const main = document.createElement("div");
+    main.className = "total-main";
+    main.appendChild(labelText);
+    if (es) {
+      // A round figure keeps no decimals; an odd share shows two (10% but 5.73%).
+      const pctOf = (x) => {
+        const v = Math.round(x * 10000) / 100;
+        return (Number.isInteger(v) ? v : v.toFixed(2)) + "%";
+      };
+      const parts = [
+        ["owner", "Owner", es.owner],
+        ["vroot", "Vali/Root", es.vali_root],
+        ["valpha", "Vali/Alpha", es.vali_alpha],
+        ["miner", "Miner", es.miner],
+      ];
+      const esplit = document.createElement("div");
+      esplit.className = "esplit";
+      esplit.title = "How this subnet's alpha emission is shared out, read live from the chain. Miners earn their Daily TAO from their slice";
+      const bar = document.createElement("div");
+      bar.className = "esplit-bar";
+      const legend = document.createElement("div");
+      legend.className = "esplit-legend";
+      for (const [cls, name, frac] of parts) {
+        const seg = document.createElement("span");
+        seg.className = `seg seg-${cls}`;
+        seg.style.flex = String(frac);
+        seg.title = `${name} ${pctOf(frac)}`;
+        bar.appendChild(seg);
+        const li = document.createElement("div");
+        li.className = "li";
+        const nm = document.createElement("span");
+        nm.className = "name";
+        const dot = document.createElement("i");
+        dot.className = `seg-${cls}`;
+        nm.append(dot, name);
+        const pct = document.createElement("span");
+        pct.className = "pct";
+        pct.textContent = pctOf(frac);
+        li.append(nm, pct);
+        legend.appendChild(li);
+      }
+      esplit.append(bar, legend);
+      main.appendChild(esplit);
+    }
+    f("total-label").replaceChildren(main);
 
     const hasMiners = d.top_miners.length > 0;
     f("table").hidden = !hasMiners;
