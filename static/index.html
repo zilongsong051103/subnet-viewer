@@ -121,7 +121,17 @@
   }
   .brand-title { margin: 0; font-size: 20px; font-weight: 500; line-height: 1.6; }
   .brandlink { display: inline-flex; align-items: center; gap: 8px; color: inherit; text-decoration: none; }
-  .brand { flex: none; width: 30px; height: 30px; border-radius: 4px; }
+  .brand { flex: none; width: 30px; height: 30px; border-radius: 6px; position: relative; isolation: isolate; display: block; }
+  .brand img { width: 100%; height: 100%; object-fit: cover; border-radius: inherit; display: block; }
+  /* A conic-gradient ring turns slowly around the brand mark; faster on hover. */
+  .brand::before {
+    content: ""; position: absolute; inset: -2px; border-radius: 8px; z-index: -1;
+    background: conic-gradient(from 0deg, #1976d2, #7c4dff, #e91e63, #1976d2);
+    animation: brand-spin 6s linear infinite;
+  }
+  .brandlink:hover .brand::before { animation-duration: 2s; }
+  @keyframes brand-spin { to { transform: rotate(1turn); } }
+  @media (prefers-reduced-motion: reduce) { .brand::before { animation: none; } }
   .navlinks { display: flex; gap: 2px; }
   /* Material's text button; the page you are on is marked the way tabs are. */
   .navbtn {
@@ -413,7 +423,7 @@
 </svg>
 <header class="appbar">
   <h1 class="brand-title">
-    <a class="brandlink" href="/"><img class="brand" src="/logo.jpg" alt=""><span>Subnet Viewer</span></a>
+    <a class="brandlink" href="/"><span class="brand"><img src="/logo.jpg" alt=""></span><span>Subnet Viewer</span></a>
   </h1>
   <nav class="navlinks">
     <a class="navbtn current" href="/" aria-current="page">Dashboard</a>
