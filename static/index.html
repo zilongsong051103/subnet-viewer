@@ -221,11 +221,12 @@
   .hint { margin: 0; }
 
   .grid {
-    display: grid; gap: 24px; /* cards in a row stretch to the same height */
+    display: grid; gap: 24px; align-items: start; /* every card is the same row-count tall (short tables pad out), so align to the top rather than stretch a card past its content */
     grid-template-columns: repeat(auto-fill, minmax(min(520px, 100%), 1fr));
   }
   .card {
     --pad: 16px;
+    --rows-h: 240px;  /* height of the miner area: ~5 rows; the empty state fills the same, so every card is one height */
     display: flex; flex-direction: column;
     background: var(--surface); border: 0; border-radius: 4px; box-shadow: var(--shadow-1);
     padding: 12px var(--pad) 14px; transition: opacity 0.15s, box-shadow 0.2s;
@@ -301,7 +302,14 @@
 
   /* The table takes the card's leftover height, so the totals line lands at the bottom
      even when a subnet has fewer than five miners. */
-  .table-wrap { overflow-x: auto; flex: 1; }
+  /* Capped at ~5 rows' worth (thead 28 + 5*31 + tfoot 57); extra miners scroll,
+     so adding more to the list never makes the card taller. */
+  .table-wrap { overflow: auto; flex: 1; max-height: var(--rows-h); }
+  /* Header and totals stay pinned while the miner rows scroll between them. The
+     opaque background keeps rows from showing through (the table collapses borders,
+     so an inset shadow draws the divider that a sticky cell border wouldn't keep). */
+  thead th { position: sticky; top: 0; z-index: 2; background: var(--surface); border-bottom: 0; box-shadow: inset 0 -1px 0 var(--divider); }
+  tfoot td { position: sticky; bottom: 0; z-index: 2; background: var(--surface); }
   /* The week's alpha price, drawn faintly behind the card header (always there,
      even for a subnet with no miners and so an empty table). */
   .spark { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
@@ -313,19 +321,18 @@
   .spark.up .spark-area { fill: url(#spark-grad-up); }
   .spark.down .spark-area { fill: url(#spark-grad-down); }
   .bar > :not(.spark) { position: relative; }  /* header contents sit above the sparkline */
-  table { width: 100%; height: 100%; border-collapse: collapse; font-size: 14px; line-height: 1.3; }
-  /* A blank row swallows the spare height; the miner rows keep their own. */
-  tr.filler { height: 100%; }
-  tr.filler td { padding: 0; border: 0; background: none; }
+  table { width: 100%; border-collapse: collapse; font-size: 14px; line-height: 1.3; }
   th, td { text-align: left; padding: 6px 8px; white-space: nowrap; border-bottom: 1px solid var(--divider); }
   tbody tr:hover > td { background: var(--hairline); }
+  tbody tr.pad:hover > td { background: none; }  /* empty padding rows don't react to hover */
   th:first-child, td:first-child { padding-left: 0; }
   th:last-child, td:last-child { padding-right: 0; }
   th { color: var(--ink-2); font-weight: 500; font-size: 12px; letter-spacing: 0.01em; }
   /* Totals may wrap after the slash on narrow screens instead of overflowing. */
   tfoot td { border-top: 1px solid var(--divider); border-bottom: 0; padding-top: 8px; font-weight: 500; white-space: normal; }
-  /* Totals row: "Top N / All M" on the left, then the emission-split bar with its
-     labels aligned beneath, filling the gap before the share / Daily-TAO columns. */
+  /* Totals row: the active-miner count ("30 miners") on the left, then the
+     emission-split bar with its labels aligned beneath, filling the gap before
+     the share / Daily-TAO columns. */
   tfoot td { vertical-align: top; }
   .total-main { display: flex; align-items: flex-start; gap: 14px; }
   .total-main .tl-text { flex: none; white-space: nowrap; padding-top: 1px; }
@@ -351,6 +358,40 @@
     font: 13px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
     background: none; border: 0; border-radius: 4px; padding: 1px 3px; margin: -1px -3px; color: var(--ink-2);
   }
+  /* Coldkey labelling: the key shows a saved label (or the short address) and a pencil
+     that opens the editor; the pencil stays quiet until the row is hovered. */
+  .ck-cell { display: inline-flex; align-items: center; gap: 2px; min-width: 0; max-width: 100%; }
+  .ck { text-decoration: none; cursor: pointer; }
+  .ck:not(.labeled):hover { text-decoration: underline; }
+  .ck.labeled {
+    min-width: 0; max-width: 150px; font-family: inherit; font-weight: 500; color: cornflowerblue;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  /* A gloss sweeps across the cornflowerblue label so it "shines"; falls back to solid
+     cornflowerblue where gradient text isn't supported or motion is reduced. */
+  @supports ((-webkit-background-clip: text) or (background-clip: text)) {
+    .ck.labeled {
+      background: linear-gradient(110deg, cornflowerblue 38%, #f0f6ff 50%, cornflowerblue 62%);
+      background-size: 220% 100%;
+      -webkit-background-clip: text; background-clip: text;
+      -webkit-text-fill-color: transparent; color: transparent;
+      animation: ck-shine 2.6s linear infinite;
+    }
+  }
+  @keyframes ck-shine { to { background-position: -220% 0; } }
+  @media (prefers-reduced-motion: reduce) {
+    .ck.labeled { animation: none; background: none; color: cornflowerblue; -webkit-text-fill-color: cornflowerblue; }
+  }
+  .ck-edit {
+    flex: none; border: 0; background: none; color: var(--ink-2); cursor: pointer;
+    font-size: 12px; line-height: 1; padding: 2px 3px; border-radius: 4px;
+  }
+  .ck-edit:hover { background: var(--hairline); color: var(--ink); }
+  .ck-addr { font: 13px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; color: var(--ink-2); word-break: break-all; }
+  @media (hover: hover) {
+    .ck-edit { opacity: 0; transition: opacity 0.15s; }
+    tbody tr:hover .ck-edit, .ck-edit:focus-visible { opacity: 1; }
+  }
   /* Owner chip, right-aligned in the header: total balance / locked. Details on hover, Taostats on click. */
   /* Material's small chip. */
   .owner-chip {
@@ -365,7 +406,7 @@
   .card-error { margin: 2px 0 0; font-size: 14px; color: var(--bad); }
   .body { flex: 1; display: flex; flex-direction: column; }
   .empty {
-    flex: 1; display: grid; place-items: center; min-height: 96px; margin: 0;
+    flex: 1; display: grid; place-items: center; min-height: var(--rows-h); margin: 0;
     color: var(--ink-2); font-size: 20px; font-weight: 500; text-align: center; cursor: default;
   }
 
@@ -473,6 +514,20 @@
   </form>
 </dialog>
 
+<dialog id="label-dialog" class="login" aria-labelledby="label-title">
+  <form id="label-form">
+    <h2 id="label-title">Label coldkey</h2>
+    <p id="label-address" class="ck-addr"></p>
+    <label for="label-input" class="visually-hidden">Label</label>
+    <input type="text" id="label-input" placeholder="e.g. Rizzo, exchange, my validator" maxlength="48" autocomplete="off">
+    <div class="login-actions">
+      <button type="button" id="label-remove" hidden>Remove</button>
+      <button type="button" id="label-cancel">Cancel</button>
+      <button type="submit" id="label-save" class="primary">Save</button>
+    </div>
+  </form>
+</dialog>
+
 <template id="card-template">
   <article class="card">
     <header class="bar">
@@ -571,13 +626,17 @@
   const REFRESH_MS = 60_000;
   const WATCH_KEY = "subnet-viewer:watchlist";
   const SORT_KEY = "subnet-viewer:sort";
+  const LABELS_KEY = "subnet-viewer:coldkey-labels";
 
+  const MINER_ROWS = 5;  // rows a card shows before scrolling; short tables pad to this
+  const MINER_COLS = 7;  // UID, Hotkey, Coldkey, Balance, Registered, Incentive, Daily TAO
   const grid = $("grid");
   const cards = new Map(); // netuid -> card
   let subnetInfo = new Map(); // netuid -> {name, symbol, price_tao, price_rank}
   let rankedCount = 0; // how many subnets have a price rank, for "#3 of 128"
   let sortBy = loadSort(); // "netuid" or "price"
   let watch = loadWatch(); // newest first
+  let labels = loadLabels(); // coldkey (ss58) -> user's label, this browser only
   let selected = Number(new URLSearchParams(location.search).get("netuid")) || null;
   if (!selected && watch.length === 0) selected = 1;
 
@@ -593,6 +652,22 @@
   function saveWatch() {
     try {
       localStorage.setItem(WATCH_KEY, JSON.stringify(watch));
+    } catch { /* storage blocked */ }
+  }
+
+  // Coldkey labels also live in this browser only, keyed by the full ss58 address so
+  // the same account reads the same label on every subnet it appears in.
+  function loadLabels() {
+    try {
+      const saved = JSON.parse(localStorage.getItem(LABELS_KEY) || "{}");
+      return new Map(Object.entries(saved).filter(([, v]) => typeof v === "string" && v));
+    } catch {
+      return new Map();
+    }
+  }
+  function saveLabels() {
+    try {
+      localStorage.setItem(LABELS_KEY, JSON.stringify(Object.fromEntries(labels)));
     } catch { /* storage blocked */ }
   }
 
@@ -709,6 +784,58 @@
     return key;
   }
 
+  // A coldkey shows its saved label (or the short address) and links to the account on
+  // Taostats, with a pencil that opens the label editor. paintColdkey keeps every cell
+  // for the same address in step after a label changes.
+  function paintColdkey(link) {
+    const address = link.dataset.coldkey;
+    const label = labels.get(address);
+    link.textContent = label || shortKey(address);
+    link.classList.toggle("labeled", !!label);
+    link.title = (label ? `${label}\n${address}` : address) + "\nOpen this account on Taostats";
+  }
+  function coldkeyCell(address) {
+    const wrap = document.createElement("span");
+    wrap.className = "ck-cell";
+    const key = document.createElement("a");
+    key.className = "hotkey ck";
+    key.href = `https://taostats.io/account/${encodeURIComponent(address)}`;
+    key.target = "_blank";
+    key.rel = "noopener noreferrer";
+    key.dataset.coldkey = address;
+    paintColdkey(key);
+    const edit = document.createElement("button");
+    edit.type = "button";
+    edit.className = "ck-edit";
+    edit.textContent = "✎";
+    edit.title = labels.has(address) ? "Edit this coldkey's label" : "Label this coldkey";
+    edit.setAttribute("aria-label", edit.title);
+    edit.addEventListener("click", () => openLabelDialog(address));
+    wrap.append(key, edit);
+    return wrap;
+  }
+  function refreshColdkeyLabels(address) {
+    document.querySelectorAll(`.ck[data-coldkey="${CSS.escape(address)}"]`).forEach(paintColdkey);
+    document.querySelectorAll(`.ck-cell .ck[data-coldkey="${CSS.escape(address)}"]`).forEach((key) => {
+      const edit = key.nextElementSibling;
+      if (edit) {
+        edit.title = labels.has(address) ? "Edit this coldkey's label" : "Label this coldkey";
+        edit.setAttribute("aria-label", edit.title);
+      }
+    });
+  }
+  function openLabelDialog(address) {
+    const dlg = $("label-dialog");
+    dlg.dataset.address = address;
+    $("label-address").textContent = address;
+    const input = $("label-input");
+    input.value = labels.get(address) || "";
+    $("label-remove").hidden = !labels.has(address);
+    dlg.showModal();
+    input.focus();
+    input.select();
+  }
+
   function minerRow(miner, fullRecordedTao, fullConsensus) {
     const tr = document.createElement("tr");
     const cell = (content, cls) => {
@@ -728,7 +855,7 @@
     uid.setAttribute("aria-label", `UID ${miner.uid}. ${uid.title}`);
 
     cell(keyButton(miner.hotkey));
-    cell(keyButton(miner.coldkey));
+    cell(coldkeyCell(miner.coldkey));
     cell(miner.balance_tao == null ? "—" : kNum(miner.balance_tao), "num");
     tr.lastElementChild.title = miner.balance_tao == null
       ? "The balance read didn't come back in time"
@@ -901,34 +1028,33 @@
     // Shares are of all miner emission, burned part included, so shares + Burn % ≈ 100%.
     const fullDailyAlpha = d.miner_burn.full_daily_alpha;
     const fullConsensus = d.miner_burn.full_consensus; // every miner, as the share's whole
-    const filler = document.createElement("tr"); // takes up the slack under short tables
-    filler.className = "filler";
-    filler.setAttribute("aria-hidden", "true");
-    filler.appendChild(document.createElement("td")).colSpan = 5;
-    f("miners").replaceChildren(
-      ...d.top_miners.map((m) => minerRow(m, d.miner_burn.full_recorded_daily_tao, fullConsensus)), filler);
+    // Every card is MINER_ROWS tall. A subnet with fewer active miners pads out with
+    // empty rows — each a full set of cells, so the columns and row-lines carry on —
+    // instead of leaving a blank gap above the totals; more miners scroll (max-height).
+    const rows = d.top_miners.map((m) => minerRow(m, d.miner_burn.full_recorded_daily_tao, fullConsensus));
+    for (let i = rows.length; i < MINER_ROWS; i++) {
+      const tr = document.createElement("tr");
+      tr.className = "pad";
+      tr.setAttribute("aria-hidden", "true");
+      for (let c = 0; c < MINER_COLS; c++) {
+        const td = document.createElement("td");
+        td.textContent = " "; // a non-breaking space gives the row a data row's height
+        tr.appendChild(td);
+      }
+      rows.push(tr);
+    }
+    f("miners").replaceChildren(...rows);
     const totals = d.miner_totals;
-    const topAlpha = d.top_miners.reduce((sum, m) => sum + m.daily_alpha, 0);
-    const topTao = d.top_miners.reduce((sum, m) => sum + m.daily_tao, 0);
-    // "Top 5 / All 113": the top-5 figure leads, the all-miners figure is muted.
-    const pair = (field, lead, rest) => {
-      const muted = document.createElement("span");
-      muted.className = "muted";
-      muted.textContent = ` / ${rest}`;
-      f(field).replaceChildren(lead, muted);
-    };
-    const topConsensus = d.top_miners.reduce((sum, m) => sum + m.consensus, 0);
-    pair("total-share", share(topConsensus, fullConsensus), share(totals.consensus, fullConsensus));
-    pair("total-tao", `τ${topTao.toFixed(2)}`, `τ${totals.daily_tao.toFixed(2)}`);
+    // The list now holds every active miner, so the totals are simply the whole:
+    // the miners' share of all emission (the whole counts burned emission too), and
+    // their combined daily TAO.
+    f("total-share").replaceChildren(share(totals.consensus, fullConsensus));
+    f("total-tao").textContent = `τ${totals.daily_tao.toFixed(2)}`;
 
-    // "Top N / All M", set beside the emission-split bar in the same (wide) cell.
+    // "30 miners": the count of active miners, all of them listed above.
     const labelText = document.createElement("span");
     labelText.className = "tl-text";
-    labelText.append(`Top ${d.top_miners.length}`);
-    const labelMuted = document.createElement("span");
-    labelMuted.className = "muted";
-    labelMuted.textContent = ` / All ${totals.count}`;
-    labelText.append(labelMuted);
+    labelText.textContent = `${totals.count} miner${totals.count === 1 ? "" : "s"}`;
 
     // The subnet's live emission split, read from the chain: a segmented bar
     // (owner / vali-root / vali-alpha / miner) between the label and the share
@@ -1268,6 +1394,26 @@
     openSeedLab();
   });
   $("login-cancel").addEventListener("click", () => loginDialog.close());
+
+  // Coldkey label editor: Save (or an empty box) stores/clears the label, Remove clears it.
+  $("label-cancel").addEventListener("click", () => $("label-dialog").close());
+  $("label-remove").addEventListener("click", () => {
+    const address = $("label-dialog").dataset.address;
+    labels.delete(address);
+    saveLabels();
+    refreshColdkeyLabels(address);
+    $("label-dialog").close();
+  });
+  $("label-form").addEventListener("submit", (e) => {
+    e.preventDefault();
+    const address = $("label-dialog").dataset.address;
+    const value = $("label-input").value.trim();
+    if (value) labels.set(address, value);
+    else labels.delete(address);
+    saveLabels();
+    refreshColdkeyLabels(address);
+    $("label-dialog").close();
+  });
   $("login-form").addEventListener("submit", async (e) => {
     e.preventDefault();
     const submit = $("login-submit");

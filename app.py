@@ -4,7 +4,7 @@ For one subnet it reports:
   * alpha price and registration fee, each with the change over ~24h. The old
     value is read from the chain at the block 24h back, so no history is stored.
   * the share of miner emission the chain burned (sent to the owner's hotkeys).
-  * the top 5 miners by estimated daily emission, valued in TAO, plus the
+  * the top miners by estimated daily emission, valued in TAO, plus the
     total emission paid to all miners.
   * the owner coldkey's free TAO balance and its locked stake on the subnet.
 
@@ -42,7 +42,6 @@ FIXED_ONE = 1 << 32  # MinerBurned is a U96F32 fixed-point fraction: 2**32 == 10
 SUMMARY_TTL = 30  # seconds; the chain only changes every 12 s anyway
 SUBNET_LIST_TTL = 120  # the list carries prices now, so keep it fairly fresh
 OPTIONAL_READ_TIMEOUT = 20  # archive reads can be slow; don't hold the page hostage
-TOP_MINERS = 5
 PRICE_HISTORY_DAYS = 7
 PRICE_HISTORY_POINTS = 25  # ~every 6.7h; the archive node drops reads past ~30 in a burst
 PRICE_HISTORY_TTL = 1800  # 30 min: a week-long line barely moves intra-day, and each build is slow
@@ -373,7 +372,7 @@ async def subnet_summary(client, netuid: int) -> dict:
     )
     miners = rank_miners(graph, price_tao, split["miner"])
     paid = [m for m in miners if not m["burned"]]
-    await add_balances(head, paid[:TOP_MINERS])
+    await add_balances(head, paid)
     identity = graph.get("identity") if isinstance(graph.get("identity"), dict) else {}
     locked_alpha = owner_stake["locked"].rao / RAO_PER_UNIT if owner_stake else None
     free_tao = owner_balance.tao if owner_balance is not None else None
@@ -439,7 +438,9 @@ async def subnet_summary(client, netuid: int) -> dict:
             "locked_alpha": locked_alpha,
             "locked_tao": locked_alpha * price_tao if locked_alpha is not None else None,
         },
-        "top_miners": paid[:TOP_MINERS],
+        # Every active (non-burned) miner, highest-earning first; the card's table
+        # scrolls, so the row count is just the number of active miners.
+        "top_miners": paid,
         # Paid to miners only: incentive burned via owner hotkeys isn't counted.
         "miner_totals": {
             "count": len(paid),
