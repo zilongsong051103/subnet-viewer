@@ -189,6 +189,24 @@
   }
   .login-actions .primary:hover { background: var(--accent); filter: brightness(1.08); box-shadow: var(--shadow-8); }
   .login-actions button:disabled { opacity: 0.5; cursor: default; box-shadow: none; }
+  /* The registration-fee burn graph, opened from the Reg fee group. */
+  .burn-dialog { width: min(600px, calc(100vw - 48px)); }
+  .burn-sub { margin: -4px 0 12px; color: var(--ink-2); font-size: 0.875rem; }
+  /* Pull the chart out to the dialog's action-row edges (16px) so it lines up with the Close button. */
+  .burn-chart { min-height: 200px; display: grid; place-items: center; margin-inline: -8px; }
+  .burn-chart svg { width: 100%; height: auto; display: block; }
+  .burn-msg { color: var(--ink-2); margin: 0; padding: 56px 0; }
+  .burn-axis { fill: var(--ink-2); font-size: 10px; }
+  .burn-grid { stroke: var(--divider); stroke-width: 1; }
+  .burn-area { fill: var(--accent-soft); }
+  .burn-line { fill: none; stroke: var(--accent); stroke-width: 2; vector-effect: non-scaling-stroke; }
+  .burn-dot { fill: var(--accent); }
+  .burn-val { fill: var(--ink); font-size: 11px; font-weight: 600; }
+  .burn-hit { fill: transparent; cursor: crosshair; }
+  .burn-crosshair { stroke: var(--ink-2); stroke-width: 1; stroke-dasharray: 3 3; }
+  .burn-tip rect { fill: var(--surface); stroke: var(--ink-2); }
+  .burn-tip-fee { fill: var(--ink); font-size: 12px; font-weight: 600; }
+  .burn-tip-time { fill: var(--ink-2); font-size: 10px; }
   /* A toggle button group: one outline around the set, the chosen one washed. */
   .theme { display: inline-flex; border: 1px solid var(--rule); border-radius: 4px; overflow: hidden; }
   .theme button {
@@ -289,6 +307,11 @@
     margin-block: 0 16px; padding-block: 14px 0;
   }
   .stat { display: flex; flex-direction: column; min-width: 0; padding-left: 10px; border-left: 3px solid var(--rule); }
+  /* The Reg fee group opens its last-day burn graph; mark it as clickable. */
+  .stat.tappable { cursor: pointer; border-radius: 0 4px 4px 0; }
+  .stat.tappable:hover { background: var(--hairline); }
+  .stat.tappable:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+  .stat.tappable .stat-label { text-decoration: underline dotted; text-underline-offset: 2px; text-decoration-color: var(--accent); }
   .stat-label { color: var(--ink-2); font-size: 12px; line-height: 1.3; }
   /* Where this subnet's alpha price ranks among all subnets: #1 is the dearest. */
   .rank { color: var(--ink); font-weight: 600; font-variant-numeric: tabular-nums; cursor: help; }
@@ -423,8 +446,9 @@
   .sk { display: block; border-radius: 4px; }
   @keyframes shimmer { from { background-position: 100% 0; } to { background-position: 0 0; } }
   @media (prefers-reduced-motion: reduce) { .sk, .card.pending .logo { animation: none; } }
-  .sk-label { width: 44px; height: 10px; margin: 4px 0 6px; }
-  .sk-value { width: 104px; height: 20px; }
+  /* Percentage widths so the placeholders fit each of the five (sometimes narrow) stat cells. */
+  .sk-label { width: 70%; max-width: 40px; height: 10px; margin: 4px 0 6px; }
+  .sk-value { width: 90%; max-width: 92px; height: 20px; }
   .sk-rows { display: grid; gap: 11px; padding-top: 6px; }
   .sk-row { height: 14px; }
   .sk-row:nth-child(odd) { width: 94%; }
@@ -533,6 +557,14 @@
   </form>
 </dialog>
 
+<dialog id="burn-dialog" class="login burn-dialog" aria-label="Registration fee over the last 24 hours">
+  <p id="burn-sub" class="burn-sub"></p>
+  <div id="burn-chart" class="burn-chart"></div>
+  <div class="login-actions">
+    <button type="button" id="burn-close" class="primary">Close</button>
+  </div>
+</dialog>
+
 <template id="card-template">
   <article class="card">
     <header class="bar">
@@ -566,6 +598,8 @@
     <p class="card-error" data-field="error" hidden></p>
     <div data-field="skeleton" aria-hidden="true">
       <div class="stats">
+        <div class="stat"><span class="sk sk-label"></span><span class="sk sk-value"></span></div>
+        <div class="stat"><span class="sk sk-label"></span><span class="sk sk-value"></span></div>
         <div class="stat"><span class="sk sk-label"></span><span class="sk sk-value"></span></div>
         <div class="stat"><span class="sk sk-label"></span><span class="sk sk-value"></span></div>
         <div class="stat"><span class="sk sk-label"></span><span class="sk sk-value"></span></div>
@@ -886,6 +920,16 @@
     el.classList.add("pending"); // no data yet: skeleton until the first response
     card.field("title").textContent = subnetLabel(netuid);
     card.field("star").addEventListener("click", () => toggleWatch(netuid));
+    // The Reg fee group opens a graph of the registration fee over the last day.
+    const feeStat = card.field("fee-stat");
+    feeStat.classList.add("tappable");
+    feeStat.setAttribute("role", "button");
+    feeStat.setAttribute("tabindex", "0");
+    feeStat.setAttribute("aria-label", "Show the registration fee over the last 24 hours");
+    feeStat.addEventListener("click", () => openBurnChart(card.netuid));
+    feeStat.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" || e.key === " ") { e.preventDefault(); openBurnChart(card.netuid); }
+    });
     enableReorder(card);
     return card;
   }
@@ -1203,6 +1247,111 @@
     svg.removeAttribute("hidden");
   }
 
+  // The registration-fee (burn) graph over the last day, opened from the Reg fee group.
+  let burnReq = 0;
+  function openBurnChart(netuid) {
+    const dlg = $("burn-dialog");
+    $("burn-sub").textContent = subnetLabel(netuid);
+    const chart = $("burn-chart");
+    chart.innerHTML = '<p class="burn-msg">Loading…</p>';
+    dlg.showModal();
+    const req = ++burnReq;
+    getJSON(`/api/subnets/${netuid}/burn-1d`).then(({ history_1d }) => {
+      if (req !== burnReq) return; // a newer open (or a close) supersedes this one
+      if (history_1d && history_1d.length >= 2) renderBurnChart(chart, history_1d);
+      else chart.innerHTML = '<p class="burn-msg">Not enough burn history to graph.</p>';
+    }).catch(() => {
+      if (req === burnReq) chart.innerHTML = '<p class="burn-msg">Couldn’t load the burn history.</p>';
+    });
+  }
+  const feeText = (v) => "τ" + parseFloat(v.toPrecision(3));
+  const agoText = (hours) => {
+    const m = Math.round(hours * 60);
+    if (m <= 0) return "now";
+    const hh = Math.floor(m / 60), mm = m % 60;
+    return hh ? `${hh}h${mm ? ` ${mm}m` : ""} ago` : `${mm}m ago`;
+  };
+  // Draws the day's fee as a smooth line with gridlines, then wires a hover readout.
+  // Each point carries its own age ("h" hours ago), so x is time, not sample index.
+  function renderBurnChart(container, data) {
+    const W = 600, H = 250, L = 56, R = 18, T = 18, B = 30, base = H - B;
+    const vals = data.map((p) => p.tao);
+    const lo = Math.min(...vals), hi = Math.max(...vals);
+    const padV = (hi - lo) * 0.15 || hi * 0.1 || 0.001;
+    const yMin = Math.max(0, lo - padV), yMax = hi + padV;
+    const x = (h) => L + (1 - h / 24) * (W - L - R);   // 24h ago at the left, now at the right
+    const y = (v) => T + (1 - (v - yMin) / ((yMax - yMin) || 1)) * (base - T);
+    const pts = data.map((p) => [x(p.h), y(p.tao)]);
+    let line = `M${pts[0][0].toFixed(1)},${pts[0][1].toFixed(1)}`;
+    for (let i = 0; i < pts.length - 1; i++) {
+      const p0 = pts[i - 1] || pts[i], p1 = pts[i], p2 = pts[i + 1], p3 = pts[i + 2] || pts[i + 1];
+      const c1x = p1[0] + (p2[0] - p0[0]) / 6, c1y = p1[1] + (p2[1] - p0[1]) / 6;
+      const c2x = p2[0] - (p3[0] - p1[0]) / 6, c2y = p2[1] - (p3[1] - p1[1]) / 6;
+      line += `C${c1x.toFixed(1)},${c1y.toFixed(1)} ${c2x.toFixed(1)},${c2y.toFixed(1)} ${p2[0].toFixed(1)},${p2[1].toFixed(1)}`;
+    }
+    const area = `M${pts[0][0].toFixed(1)},${base}L${line.slice(1)}L${pts[pts.length - 1][0].toFixed(1)},${base}Z`;
+    let grid = "", yLabels = "";
+    for (let g = 0; g <= 4; g++) {                     // five horizontal gridlines + labels
+      const v = yMin + (yMax - yMin) * g / 4, yy = y(v).toFixed(1);
+      grid += `<line class="burn-grid" x1="${L}" y1="${yy}" x2="${W - R}" y2="${yy}"/>`;
+      yLabels += `<text class="burn-axis" x="${L - 6}" y="${(y(v) + 3).toFixed(1)}" text-anchor="end">${feeText(v)}</text>`;
+    }
+    let xLabels = "";
+    for (const ha of [24, 18, 12, 6, 0]) {             // time ticks across the day
+      const xx = x(ha), anchor = ha === 24 ? "start" : ha === 0 ? "end" : "middle";
+      xLabels += `<text class="burn-axis" x="${xx.toFixed(1)}" y="${H - 8}" text-anchor="${anchor}">${ha ? `-${ha}h` : "now"}</text>`;
+    }
+    container.innerHTML = `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="Registration fee over the last 24 hours">
+      ${grid}
+      <path class="burn-area" d="${area}"/>
+      <path class="burn-line" d="${line}"/>
+      ${yLabels}${xLabels}
+      <g class="burn-cursor" style="display:none">
+        <line class="burn-crosshair" x1="0" x2="0" y1="${T}" y2="${base}"/>
+        <circle class="burn-dot burn-cdot" r="3.5"/>
+      </g>
+      <g class="burn-tip" style="display:none">
+        <rect rx="4" width="92" height="34"/>
+        <text class="burn-tip-fee" x="8" y="15"></text>
+        <text class="burn-tip-time" x="8" y="28"></text>
+      </g>
+      <rect class="burn-hit" x="${L}" y="${T}" width="${W - L - R}" height="${base - T}"/>
+    </svg>`;
+
+    const svg = container.querySelector("svg");
+    const cursor = svg.querySelector(".burn-cursor");
+    const cLine = svg.querySelector(".burn-crosshair");
+    const cDot = svg.querySelector(".burn-cdot");
+    const tip = svg.querySelector(".burn-tip");
+    const tipFee = svg.querySelector(".burn-tip-fee");
+    const tipTime = svg.querySelector(".burn-tip-time");
+    const hit = svg.querySelector(".burn-hit");
+    const move = (clientX) => {
+      const rect = svg.getBoundingClientRect();
+      const sx = (clientX - rect.left) / rect.width * W;          // viewBox x from screen x
+      let i = 0, best = Infinity;                                 // nearest point by x
+      for (let k = 0; k < pts.length; k++) {
+        const d = Math.abs(pts[k][0] - sx);
+        if (d < best) { best = d; i = k; }
+      }
+      const [cx, cy] = pts[i];
+      cLine.setAttribute("x1", cx.toFixed(1)); cLine.setAttribute("x2", cx.toFixed(1));
+      cDot.setAttribute("cx", cx.toFixed(1)); cDot.setAttribute("cy", cy.toFixed(1));
+      cursor.style.display = "";
+      tipFee.textContent = feeText(data[i].tao);
+      tipTime.textContent = agoText(data[i].h);
+      let tx = cx + 10, ty = cy - 42;                            // tooltip above-right, kept in bounds
+      if (tx + 92 > W - R) tx = cx - 102;
+      if (ty < T) ty = cy + 8;
+      tip.setAttribute("transform", `translate(${tx.toFixed(1)},${ty.toFixed(1)})`);
+      tip.style.display = "";
+    };
+    hit.addEventListener("mousemove", (e) => move(e.clientX));
+    hit.addEventListener("mouseleave", () => { cursor.style.display = "none"; tip.style.display = "none"; });
+    hit.addEventListener("touchstart", (e) => { if (e.touches[0]) move(e.touches[0].clientX); }, { passive: true });
+    hit.addEventListener("touchmove", (e) => { if (e.touches[0]) move(e.touches[0].clientX); }, { passive: true });
+  }
+
   async function load(card) {
     const seq = ++card.seq;
     card.el.classList.add("loading");
@@ -1402,6 +1551,16 @@
 
   // Coldkey label editor: Save (or an empty box) stores/clears the label, Remove clears it.
   $("label-cancel").addEventListener("click", () => $("label-dialog").close());
+  $("burn-close").addEventListener("click", () => { burnReq++; $("burn-dialog").close(); });
+  // Click on the backdrop (outside the dialog box) closes any modal.
+  for (const id of ["burn-dialog", "label-dialog", "login"]) {
+    $(id).addEventListener("click", (e) => {
+      const r = e.currentTarget.getBoundingClientRect();
+      if (e.clientX < r.left || e.clientX > r.right || e.clientY < r.top || e.clientY > r.bottom) {
+        e.currentTarget.close();
+      }
+    });
+  }
   $("label-remove").addEventListener("click", () => {
     const address = $("label-dialog").dataset.address;
     labels.delete(address);

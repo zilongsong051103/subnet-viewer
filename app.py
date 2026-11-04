@@ -49,6 +49,8 @@ PRICE_HISTORY_CONCURRENCY = 6  # few at a time: the public archive drops bursts,
 PRICE_HISTORY_READ_TIMEOUT = 20  # per attempt
 PRICE_HISTORY_RETRIES = 3  # the archive is flaky; retry a dropped point before giving up
 PRICE_HISTORY_WARM_INTERVAL = 1200  # 20 min: rebuild the shared history before its cache expires
+BURN_HISTORY_POINTS = 48  # ~every 30 min over the last day; one archive read per point for the one subnet
+BURN_HISTORY_TTL = 600  # 10 min: the registration fee moves slowly, and each build is a burst of reads
 STATIC_DIR = Path(__file__).parent / "static"
 
 _cache: dict[object, tuple[float, object]] = {}
@@ -318,6 +320,37 @@ async def warm_price_history(client) -> None:
         await asyncio.sleep(PRICE_HISTORY_WARM_INTERVAL)
 
 
+async def build_burn_history(client, netuid: int) -> list[dict]:
+    """One subnet's registration fee (burn) over the last day; oldest first.
+
+    The burn is per-subnet, so unlike the price sweep this is one archive read per
+    sample — a few dozen reads for the one subnet, built on demand when its graph is
+    opened. Each kept point carries its own age, so a dropped read just leaves a gap
+    rather than shifting the rest of the line in time.
+    """
+    now = await client.block()
+    step = BLOCKS_PER_DAY // (BURN_HISTORY_POINTS - 1)
+    blocks = [now - BLOCKS_PER_DAY + i * step for i in range(BURN_HISTORY_POINTS)]
+
+    gate = asyncio.Semaphore(PRICE_HISTORY_CONCURRENCY)
+
+    async def sample(block: int):
+        async with gate:
+            for attempt in range(PRICE_HISTORY_RETRIES):
+                try:
+                    head = await client.at(block)
+                    fee = await asyncio.wait_for(head.subnets.burn(netuid), PRICE_HISTORY_READ_TIMEOUT)
+                    return fee.tao
+                except Exception:
+                    await asyncio.sleep(0.3 * (attempt + 1))
+            return None
+
+    fees = await asyncio.gather(*(sample(b) for b in blocks))
+    # "h" is hours before now (12 s/block); the newest point sits at ~0h.
+    return [{"h": round((now - block) * 12 / 3600, 3), "tao": fee}
+            for block, fee in zip(blocks, fees) if fee is not None]
+
+
 async def subnet_summary(client, netuid: int) -> dict:
     block = await client.block()
     head = await client.at(block)
@@ -511,6 +544,19 @@ async def get_price_history(netuid: int = PathParam(ge=1, le=65535)):
         history = await cached(("price7d", netuid), PRICE_HISTORY_TTL,
                                lambda: price_history(app.state.client, netuid))
         return {"netuid": netuid, "history_7d": history}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise chain_error(e) from e
+
+
+@app.get("/api/subnets/{netuid}/burn-1d")
+async def get_burn_history(netuid: int = PathParam(ge=1, le=65535)):
+    """The last day's registration fee (burn), in TAO, for the on-click graph."""
+    try:
+        history = await cached(("burn1d", netuid), BURN_HISTORY_TTL,
+                               lambda: build_burn_history(app.state.client, netuid))
+        return {"netuid": netuid, "history_1d": history}
     except HTTPException:
         raise
     except Exception as e:
