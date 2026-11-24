@@ -530,6 +530,7 @@
     <select id="sort" title="Order of the subnet list">
       <option value="netuid">By netuid</option>
       <option value="price">By price rank</option>
+      <option value="emission">By emission rank</option>
     </select>
     <div class="theme" role="group" aria-label="Theme">
       <button type="button" data-theme-choice="system" title="Follow your device setting">Auto</button>
@@ -651,7 +652,7 @@
           <span class="stat-line"><span class="stat-value" data-field="burn"></span><span class="delta" data-field="burn-full"></span></span>
         </div>
         <div class="stat" data-field="emission-stat">
-          <span class="stat-label">Emission</span>
+          <span class="stat-label">Emission <span class="rank" data-field="emission-rank" hidden></span></span>
           <span class="stat-line"><span class="stat-value" data-field="emission"></span><span class="delta" data-field="emission-day"></span></span>
         </div>
         <div class="stat" data-field="pool-stat">
@@ -700,7 +701,9 @@
   const cards = new Map(); // netuid -> card
   let subnetInfo = new Map(); // netuid -> {name, symbol, price_tao, price_rank}
   let rankedCount = 0; // how many subnets have a price rank, for "#3 of 128"
-  let sortBy = loadSort(); // "netuid" or "price"
+  let emittingCount = 0; // how many have an emission rank
+  const SORTS = ["netuid", "price", "emission"];
+  let sortBy = loadSort(); // one of SORTS
   let watch = loadWatch(); // newest first
   let labels = loadLabels(); // coldkey (ss58) -> user's label, this browser only
   let selected = Number(new URLSearchParams(location.search).get("netuid")) || null;
@@ -739,7 +742,8 @@
 
   function loadSort() {
     try {
-      return localStorage.getItem(SORT_KEY) === "price" ? "price" : "netuid";
+      const saved = localStorage.getItem(SORT_KEY);
+      return SORTS.includes(saved) ? saved : "netuid";
     } catch {
       return "netuid";
     }
@@ -781,11 +785,14 @@
     return `SN${netuid}${name ? ` · ${name}` : ""}`;
   };
   const priceRank = (netuid) => subnetInfo.get(netuid)?.price_rank ?? null;
-  // By netuid, or by price rank with the dearest alpha first. Subnets the chain
-  // gave no price for sort last, by netuid among themselves.
+  // The rank the list is sorted by: price (#1 dearest alpha) or emission (#1 largest share).
+  const sortRank = (netuid) => sortBy === "price" ? priceRank(netuid)
+    : sortBy === "emission" ? subnetInfo.get(netuid)?.emission_rank ?? null : null;
+  // By netuid, or by rank. Subnets without that rank (no price, no emission) sort
+  // last, by netuid among themselves.
   function compareSubnets(a, b) {
-    if (sortBy !== "price") return a - b;
-    const [rankA, rankB] = [priceRank(a), priceRank(b)];
+    if (sortBy === "netuid") return a - b;
+    const [rankA, rankB] = [sortRank(a), sortRank(b)];
     if (rankA === null && rankB === null) return a - b;
     if (rankA === null) return 1;
     if (rankB === null) return -1;
@@ -1216,6 +1223,14 @@
       rankEl.title = `Price rank ${rank} of ${rankedCount} subnets (#1 has the dearest alpha)`;
     }
 
+    const eRank = info?.emission_rank ?? null;
+    const eRankEl = card.field("emission-rank");
+    eRankEl.hidden = eRank === null;
+    if (eRank !== null) {
+      eRankEl.textContent = `#${eRank}`;
+      eRankEl.title = `Emission rank ${eRank} of ${emittingCount} subnets (#1 gets the largest share)`;
+    }
+
     const pct = info?.emission_pct ?? null;
     card.field("emission").textContent = pct === null ? "—" : `${pct.toFixed(2)}%`;
     card.field("emission-day").textContent = pct === null ? "" : `(${tao(info.emission_tao_per_day)}/d)`;
@@ -1600,8 +1615,8 @@
     const ids = new Set([...subnetInfo.keys(), ...watch]);
     if (selected) ids.add(selected);
     const labels = [...ids].sort(compareSubnets).map((n) => {
-      const rank = priceRank(n);
-      const rankTag = sortBy === "price" && rank !== null ? `#${rank} · ` : "";
+      const rank = sortRank(n);
+      const rankTag = rank !== null ? `#${rank} · ` : "";
       return [n, `${watch.includes(n) ? "★ " : ""}${rankTag}${subnetLabel(n)}`];
     });
     const shows = `${selected}|${labels.map(([n, label]) => `${n}:${label}`).join("|")}`;
@@ -1619,6 +1634,7 @@
       const subnets = await getJSON("/api/subnets");
       subnetInfo = new Map(subnets.map((s) => [s.netuid, s]));
       rankedCount = subnets.filter((s) => s.price_rank !== null).length;
+      emittingCount = subnets.filter((s) => s.emission_rank !== null).length;
       $("error").hidden = true;
       cards.forEach(showListStats); // ranks and emission shares move over time
     } catch (e) {
@@ -1682,7 +1698,7 @@
 
   $("sort").value = sortBy;
   $("sort").addEventListener("change", (e) => {
-    sortBy = e.target.value === "price" ? "price" : "netuid";
+    sortBy = SORTS.includes(e.target.value) ? e.target.value : "netuid";
     try {
       localStorage.setItem(SORT_KEY, sortBy);
     } catch { /* storage blocked: the choice lasts this visit */ }

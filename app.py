@@ -688,7 +688,7 @@ async def subnet_summary(client, netuid: int) -> dict:
 
 
 async def subnet_list(client) -> list[dict]:
-    """Every subnet with its spot price, price rank and share of TAO emission."""
+    """Every subnet with its spot price and share of TAO emission, and its rank by each."""
     head = await client.at()
     infos, prices = await asyncio.gather(
         head.runtime(SubnetInfoRuntimeApi.get_all_dynamic_info, []),
@@ -707,12 +707,16 @@ async def subnet_list(client) -> list[dict]:
             "price_rank": None,  # filled in below; stays None when the chain has no price
             "emission_pct": info["tao_in_emission"] / network_emission * 100 if network_emission else None,
             "emission_tao_per_day": info["tao_in_emission"] * BLOCKS_PER_DAY / RAO_PER_UNIT,
+            "emission_rank": None,  # filled in below; None while the subnet gets no emission
         }
         for info in live
     ]
     priced = [s for s in subnets if s["price_tao"] is not None]
     for rank, subnet in enumerate(sorted(priced, key=lambda s: s["price_tao"], reverse=True), start=1):
         subnet["price_rank"] = rank
+    emitting = [s for s in subnets if s["emission_pct"]]
+    for rank, subnet in enumerate(sorted(emitting, key=lambda s: s["emission_pct"], reverse=True), start=1):
+        subnet["emission_rank"] = rank
     return subnets
 
 
