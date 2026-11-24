@@ -17,6 +17,7 @@ import asyncio
 import contextlib
 import hashlib
 import hmac
+import json
 import os
 import re
 import secrets
@@ -53,6 +54,12 @@ PRICE_HISTORY_RETRIES = 3  # the archive is flaky; retry a dropped point before 
 PRICE_HISTORY_WARM_INTERVAL = 1200  # 20 min: rebuild the shared history before its cache expires
 BURN_SNAPSHOT_MIN_STEP = 300  # metagraph snapshots at most every 300 blocks (24/day) for a short immunity period
 BURN_HISTORY_TTL = 600  # 10 min: the registration fee moves slowly, and each build is a burst of reads
+REG_HISTORY_DAYS = 30
+REG_HISTORY_TTL = 1800  # 30 min for the daily counts; the snapshots behind them are kept far longer
+REG_SNAPSHOT_MAX = 130  # cap per subnet; below ~1,700 blocks of immunity the counts become a floor
+REG_TIME_ANCHOR_STEP = 5 * BLOCKS_PER_DAY  # chain timestamps every ~5 days; times in between are interpolated
+REG_FILL_CONCURRENCY = 2  # background snapshot reads in flight: the archive rations historical work
+REG_CACHE_DIR = Path(os.environ.get("REG_CACHE_DIR", Path(__file__).parent / ".cache" / "registrations"))
 STATIC_DIR = Path(__file__).parent / "static"
 
 _cache: dict[object, tuple[float, object]] = {}
@@ -340,7 +347,7 @@ async def build_burn_history(client, netuid: int) -> dict:
     now = await client.block()
     start = now - BLOCKS_PER_DAY
     head, then = await asyncio.gather(client.at(now), client.at(start))
-    hl, mult, min_burn, max_burn, burn_now, now_ms, graph = await asyncio.gather(
+    hl, mult, min_burn, max_burn, burn_now, now_ms, graph, reg_allowed, recycled = await asyncio.gather(
         head.query(storage.SubtensorModule.BurnHalfLife, [netuid]),
         head.query(storage.SubtensorModule.BurnIncreaseMult, [netuid]),
         head.query(storage.SubtensorModule.MinBurn, [netuid]),
@@ -348,6 +355,8 @@ async def build_burn_history(client, netuid: int) -> dict:
         head.query(storage.SubtensorModule.Burn, [netuid]),
         head.query(storage.Timestamp.Now),
         head.runtime(SubnetInfoRuntimeApi.get_metagraph, [netuid]),
+        optional(head.query(storage.SubtensorModule.NetworkRegistrationAllowed, [netuid])),
+        optional(head.query(storage.SubtensorModule.RAORecycledForRegistration, [netuid])),
     )
     if not isinstance(graph, dict):
         raise HTTPException(404, f"Subnet {netuid} does not exist")
@@ -413,6 +422,133 @@ async def build_burn_history(client, netuid: int) -> dict:
         "half_life": hl,
         "mult": mult_bits / 2**64,
         "exact": abs(series[-1] - int(burn_now)) <= 2,  # a rao or two of rounding is fine
+        # For the dialog's chips.
+        "burn_now_tao": int(burn_now) / RAO_PER_UNIT,
+        "registrations_24h": sum(registrations.values()),
+        "immunity_period": immunity,
+        "registration_allowed": None if reg_allowed is None else bool(reg_allowed),
+        "total_recycled_tao": None if recycled is None else int(recycled) / RAO_PER_UNIT,
+    }
+
+
+# Registrations per day for the reg-fee dialog. The chain keeps no registration log,
+# only each UID's latest registration block (BlockAtRegistration). A fresh UID can't
+# be replaced until its immunity period ends, so reading that map at snapshots spaced
+# a little under the immunity period catches every registration. A month is dozens of
+# historical reads, which the public archive rations, so a background task fetches the
+# snapshots a couple at a time and keeps each on disk (a past block never changes);
+# the endpoint answers at once from whatever has arrived and says how much is missing.
+_reg_fill: dict[int, asyncio.Task] = {}
+
+
+def _reg_cache_path(netuid: int, kind: str, block: int) -> Path:
+    return REG_CACHE_DIR / str(netuid) / f"{kind}-{block}.json"
+
+
+def _reg_cache_get(netuid: int, kind: str, block: int):
+    try:
+        return json.loads(_reg_cache_path(netuid, kind, block).read_text())
+    except (OSError, ValueError):
+        return None
+
+
+def _reg_cache_put(netuid: int, kind: str, block: int, value) -> None:
+    path = _reg_cache_path(netuid, kind, block)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(value))
+    tmp.replace(path)
+
+
+def _reg_plan(now: int, immunity: int) -> tuple[int, list[int], list[int], bool]:
+    """Window start, snapshot blocks (newest first) and timestamp anchors, on fixed grids."""
+    span = (REG_HISTORY_DAYS + 1) * BLOCKS_PER_DAY  # a day extra, so the oldest date is whole
+    start = now - span
+    step = max(BURN_SNAPSHOT_MIN_STEP, immunity - 100, span // REG_SNAPSHOT_MAX)
+    snaps = [b for b in range((now // step) * step, start, -step) if b < now]
+    anchors = [b for b in range((now // REG_TIME_ANCHOR_STEP) * REG_TIME_ANCHOR_STEP,
+                                start - REG_TIME_ANCHOR_STEP, -REG_TIME_ANCHOR_STEP) if b < now]
+    complete = immunity >= span or step < immunity
+    return start, snaps, anchors, complete
+
+
+async def _reg_fill_task(client, netuid: int, snaps: list[int], anchors: list[int]) -> None:
+    gate = asyncio.Semaphore(REG_FILL_CONCURRENCY)
+
+    async def fetch(kind: str, block: int):
+        if _reg_cache_get(netuid, kind, block) is not None:
+            return
+        async with gate:
+            for attempt in range(4):
+                try:
+                    h = await client.at(block)
+                    if kind == "regs":
+                        rows = await h.query_map(storage.SubtensorModule.BlockAtRegistration, [netuid])
+                        value = [[int(u), int(b)] for u, b in rows]
+                    else:
+                        value = int(await h.query(storage.Timestamp.Now))
+                    _reg_cache_put(netuid, kind, block, value)
+                    return
+                except Exception:
+                    await asyncio.sleep(5 * (attempt + 1))  # rate limits need a real pause
+
+    try:  # anchors, then snapshots newest first, so recent days complete soonest
+        await asyncio.gather(*(fetch("time", b) for b in anchors), *(fetch("regs", b) for b in snaps))
+    finally:
+        _reg_fill.pop(netuid, None)
+
+
+async def registration_history(client, netuid: int) -> dict:
+    now = await client.block()
+    head = await client.at(now)
+    graph, now_ms = await asyncio.gather(
+        head.runtime(SubnetInfoRuntimeApi.get_metagraph, [netuid]),
+        head.query(storage.Timestamp.Now))
+    if not isinstance(graph, dict):
+        raise HTTPException(404, f"Subnet {netuid} does not exist")
+    now_ms, immunity = int(now_ms), int(graph["immunity_period"])
+    start, snaps, anchors, complete = _reg_plan(now, immunity)
+
+    loaded = {b: v for b in snaps if (v := _reg_cache_get(netuid, "regs", b)) is not None}
+    times = {b: v for b in anchors if (v := _reg_cache_get(netuid, "time", b)) is not None}
+    missing = len(snaps) - len(loaded) + len(anchors) - len(times)
+    if missing and netuid not in _reg_fill:
+        _reg_fill[netuid] = asyncio.create_task(_reg_fill_task(client, netuid, snaps, anchors))
+
+    # Count only the stretch back from today that unbroken snapshots cover: each one
+    # vouches for registrations up to an immunity period before it.
+    floor = now - immunity
+    for b in snaps:  # newest first
+        if b not in loaded:
+            break
+        floor = b - immunity
+    floor = max(floor, start)
+
+    seen = {(u, b) for u, b in enumerate(int(x) for x in graph["block_at_registration"]) if floor < b <= now}
+    for rows in loaded.values():
+        seen.update((u, b) for u, b in rows if floor < b <= now)
+
+    points = sorted([(now, now_ms), *times.items()])
+
+    def time_of(block):  # straight lines between known chain times; 12 s/block beyond them
+        for (b0, t0), (b1, t1) in zip(points, points[1:]):
+            if b0 <= block <= b1:
+                return t0 + (block - b0) * (t1 - t0) / (b1 - b0)
+        b0, t0 = points[0]
+        return t0 + (block - b0) * 12_000
+
+    day = lambda ms: time.strftime("%Y-%m-%d", time.gmtime(ms / 1000))
+    counts = Counter(day(time_of(b)) for _, b in seen)
+    first_whole = day(time_of(floor) + 86_400_000) if floor > start else ""  # days before it aren't fully covered
+    today = now_ms // 86_400_000
+    days = [day((today - k) * 86_400_000) for k in range(REG_HISTORY_DAYS - 1, -1, -1)]
+    return {
+        # oldest first; today is partial; a day not yet covered is null, not 0
+        "days": [{"date": d, "count": counts.get(d, 0) if d >= first_whole else None} for d in days],
+        "total": sum(counts.get(d, 0) for d in days if d >= first_whole),
+        "complete": complete,  # False: immunity too short to catch every registration, counts are a floor
+        "partial": missing > 0,  # still fetching snapshots in the background; ask again shortly
+        "progress": [len(loaded) + len(times), len(snaps) + len(anchors)],
     }
 
 
@@ -609,6 +745,21 @@ async def get_price_history(netuid: int = PathParam(ge=1, le=65535)):
         history = await cached(("price7d", netuid), PRICE_HISTORY_TTL,
                                lambda: price_history(app.state.client, netuid))
         return {"netuid": netuid, "history_7d": history}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise chain_error(e) from e
+
+
+@app.get("/api/subnets/{netuid}/registrations-30d")
+async def get_registration_history(netuid: int = PathParam(ge=1, le=65535)):
+    """Registrations per day over the last month, for the reg-fee dialog's bar chart."""
+    try:
+        data = await cached(("regs30d", netuid), REG_HISTORY_TTL,
+                            lambda: registration_history(app.state.client, netuid))
+        if data["partial"]:  # still filling: let the next poll see new snapshots
+            _cache.pop(("regs30d", netuid), None)
+        return {"netuid": netuid, **data}
     except HTTPException:
         raise
     except Exception as e:

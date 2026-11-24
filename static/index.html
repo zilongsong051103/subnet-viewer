@@ -190,10 +190,30 @@
   .login-actions .primary:hover { background: var(--accent); filter: brightness(1.08); box-shadow: var(--shadow-8); }
   .login-actions button:disabled { opacity: 0.5; cursor: default; box-shadow: none; }
   /* The registration-fee burn graph, opened from the Reg fee group. */
-  .burn-dialog { width: min(1040px, calc(100vw - 48px)); }
-  .burn-sub { margin: -4px 0 12px; color: var(--ink-2); font-size: 0.875rem; }
+  .burn-dialog { width: min(1040px, calc(100vw - 48px)); max-height: calc(100vh - 32px); overflow: auto; }
+  /* Under the fee graph: registrations per day for a month, then the registration facts as chips. */
+  .reg-bars-head { display: flex; justify-content: space-between; gap: 12px; margin: 16px 0 4px; padding-top: 16px; border-top: 1px solid var(--divider); color: var(--ink-2); font-size: 0.8125rem; }
+  .reg-bars-head b { color: var(--ink); font-weight: 600; }
+  .reg-bars { min-height: 150px; display: grid; place-items: center; margin-inline: -8px; }
+  .reg-bars svg { width: 100%; height: auto; display: block; }
+  .reg-bar { fill: #a05070; }
+  .reg-bar.today { opacity: 0.55; }
+  .reg-bar.on { fill: #c5628a; opacity: 1; }
+  /* Registration facts at the top of the dialog: small cards, label over value. */
+  .reg-cards { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; padding-bottom: 18px; border-bottom: 1px solid var(--divider); }
+  @media (max-width: 640px) { .reg-cards { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+  .reg-chip {
+    display: flex; flex-direction: column; gap: 3px; min-width: 0; padding: 10px 12px;
+    border: 1px solid var(--divider); border-radius: 4px; background: var(--hairline);
+  }
+  .reg-chip span { color: var(--ink-2); font-size: 0.75rem; line-height: 1.3; }
+  .reg-chip b { color: var(--ink); font-size: 0.9375rem; font-weight: 600; line-height: 1.3;
+    font-variant-numeric: tabular-nums; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .reg-chip.good b { color: var(--good); }
+  .reg-chip.bad b { color: var(--bad); }
+  .burn-sub { margin: -4px 0 14px; color: var(--ink-2); font-size: 0.875rem; }
   /* Pull the chart out to the dialog's action-row edges (16px) so it lines up with the Close button. */
-  .burn-chart { min-height: 340px; display: grid; place-items: center; margin-inline: -8px; }
+  .burn-chart { min-height: 340px; display: grid; place-items: center; margin: 14px -8px 0; }
   .burn-chart svg { width: 100%; height: auto; display: block; }
   .burn-msg { color: var(--ink-2); margin: 0; padding: 56px 0; }
   .burn-axis { fill: var(--ink-2); font-size: 11px; }
@@ -563,9 +583,12 @@
 
 <dialog id="burn-dialog" class="login burn-dialog" aria-label="Registration fee over the last 24 hours">
   <p id="burn-sub" class="burn-sub"></p>
+  <div id="reg-chips" class="reg-cards"></div>
   <div id="burn-chart" class="burn-chart"></div>
+  <div class="reg-bars-head"><span>Registrations per day · last 30 days (UTC)</span><span id="reg-total"></span></div>
+  <div id="reg-bars" class="reg-bars"></div>
   <div class="login-actions">
-    <button type="button" id="burn-close" class="primary">Close</button>
+    <button type="button" id="burn-close">Close</button>
   </div>
 </dialog>
 
@@ -1264,15 +1287,28 @@
   }
 
   // The registration-fee (burn) graph over the last day, opened from the Reg fee group.
-  let burnReq = 0, burnData = null;
+  let burnReq = 0, burnData = null, regData = null;
   function openBurnChart(netuid) {
     const dlg = $("burn-dialog");
     $("burn-sub").textContent = subnetLabel(netuid);
     const chart = $("burn-chart");
     chart.innerHTML = '<p class="burn-msg">Loading…</p>';
-    burnData = null; // a resize mid-load must not redraw the previous subnet's graph
+    burnData = regData = null; // a resize mid-load must not redraw the previous subnet's graphs
+    $("reg-bars").innerHTML = '<p class="burn-msg">Loading registrations…</p>';
+    $("reg-total").textContent = "";
+    $("reg-chips").replaceChildren();
     dlg.showModal();
     const req = ++burnReq;
+    // The month's snapshots arrive in the background; poll until they're all in.
+    const loadRegs = () => getJSON(`/api/subnets/${netuid}/registrations-30d`).then((r) => {
+      if (req !== burnReq || !dlg.open) return;
+      regData = r;
+      renderRegBars($("reg-bars"), r);
+      if (r.partial) setTimeout(loadRegs, 6000);
+    }).catch(() => {
+      if (req === burnReq) $("reg-bars").innerHTML = '<p class="burn-msg">Couldn’t load the registrations.</p>';
+    });
+    loadRegs();
     getJSON(`/api/subnets/${netuid}/burn-1d`).then((d) => {
       if (req !== burnReq) return; // a newer open (or a close) supersedes this one
       if (!d.burn || d.burn.length < 2) {
@@ -1282,6 +1318,7 @@
       if (!d.exact) $("burn-sub").textContent += " · approximate";
       burnData = d;
       renderBurnChart(chart, d);
+      renderRegChips(d);
     }).catch(() => {
       if (req === burnReq) chart.innerHTML = '<p class="burn-msg">Couldn’t load the burn history.</p>';
     });
@@ -1300,7 +1337,7 @@
     // Drawn 1:1 at the dialog's width (text stays its true size; a wider plot gives
     // fewer blocks per pixel), about 0.42 as tall, kept on screen.
     const W = Math.max(320, Math.round(container.clientWidth));
-    const H = Math.round(Math.max(240, Math.min(470, W * 0.42, innerHeight - 230)));
+    const H = Math.round(Math.max(220, Math.min(400, W * 0.34, innerHeight - 560)));
     const L = 8, R = 70, T = 12, B = 28, base = H - B, plotW = W - L - R;
     const vals = d.burn.map((r) => r / 1e9), n = vals.length, last = vals[n - 1];
     // Scale to the day's own range, as TaoMarketCap does: the floor (the fee never drops
@@ -1407,6 +1444,97 @@
     hit.addEventListener("mouseleave", () => { cursor.style.display = "none"; tip.style.display = "none"; });
     hit.addEventListener("touchstart", (e) => { if (e.touches[0]) move(e.touches[0].clientX, e.touches[0].clientY); }, { passive: true });
     hit.addEventListener("touchmove", (e) => { if (e.touches[0]) move(e.touches[0].clientX, e.touches[0].clientY); }, { passive: true });
+  }
+
+  // The registration facts, as chips under the bars (TaoMarketCap's header row, here).
+  function renderRegChips(d) {
+    const atMin = d.burn_now_tao <= d.min_tao;
+    const perHour = 1 - 0.5 ** (300 / d.half_life); // 300 blocks an hour
+    // Two groups, one row each: what a registration costs, then how fast it moves.
+    const chips = [
+      ["Current cost", burnTau(d.burn_now_tao, 4)],
+      ["Burn range", `${burnTau(d.min_tao, 4)} – ${burnTau(d.max_tao, 4)}`],
+      ["Cost multiplier", `+${parseFloat(((d.mult - 1) * 100).toFixed(2))}%`],
+      ["Total recycled", d.total_recycled_tao == null ? "—"
+        : "τ" + d.total_recycled_tao.toLocaleString("en-US", { maximumFractionDigits: 2 })],
+      ["Registrations 24h", d.registrations_24h.toLocaleString("en-US")],
+      ["Burn decay", atMin ? "Minimum reached" : `−${(perHour * 100).toFixed(1)}% / h`, atMin ? "good" : ""],
+      ["Decay half-life", `${d.half_life.toLocaleString("en-US")} blocks`],
+      ["Immunity period", `${d.immunity_period.toLocaleString("en-US")} blocks`],
+    ];
+    $("reg-chips").replaceChildren(...chips.map(([k, v, cls]) => {
+      const chip = document.createElement("div");
+      chip.className = cls ? `reg-chip ${cls}` : "reg-chip";
+      const key = document.createElement("span"), val = document.createElement("b");
+      key.textContent = k; val.textContent = v;
+      chip.append(key, val);
+      return chip;
+    }));
+  }
+  // Neurons registered per UTC day over the month, as bars (today, still filling, is faded).
+  function renderRegBars(container, r) {
+    const W = Math.max(320, Math.round(container.clientWidth)), H = 150, L = 8, R = 70, T = 10, B = 22;
+    const base = H - B, plotW = W - L - R, days = r.days, n = days.length;
+    const max = Math.max(1, ...days.map((x) => x.count || 0)), step = niceStep(max / 3), top = Math.ceil(max / step) * step;
+    const y = (v) => base - (v / top) * (base - T);
+    const slot = plotW / n, bw = Math.max(2, slot * 0.68);
+    const dayLabel = (iso, opts) => new Date(`${iso}T00:00:00Z`).toLocaleDateString([], { timeZone: "UTC", ...opts });
+    let grid = "", labels = "", bars = "";
+    for (let k = 1; k * step <= top; k++) {
+      const yy = y(k * step).toFixed(1);
+      grid += `<line class="burn-grid" x1="${L}" y1="${yy}" x2="${W - R}" y2="${yy}"/>`;
+      labels += `<text class="burn-axis" x="${W - R + 6}" y="${(+yy + 3.5).toFixed(1)}">${(k * step).toLocaleString("en-US")}</text>`;
+    }
+    days.forEach((dd, i) => {
+      const x = L + i * slot + (slot - bw) / 2, top_ = y(dd.count || 0);
+      if (dd.count != null) bars += `<rect class="reg-bar${i === n - 1 ? " today" : ""}" data-i="${i}" x="${x.toFixed(1)}" y="${top_.toFixed(1)}" width="${bw.toFixed(1)}" height="${(base - top_).toFixed(1)}" rx="1"/>`;
+      if (i % 5 === 4 || i === n - 1) {
+        labels += `<text class="burn-axis" x="${(L + i * slot + slot / 2).toFixed(1)}" y="${H - 6}" text-anchor="middle">${dayLabel(dd.date, { month: "short", day: "numeric" })}</text>`;
+      }
+    });
+    container.innerHTML = `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="Registrations per day over the last 30 days">
+      ${grid}<line class="burn-grid" x1="${L}" y1="${base}" x2="${W - R}" y2="${base}"/>${bars}${labels}
+      <g class="burn-tip" style="display:none"><rect rx="4" width="150" height="34"/>
+        <text class="burn-tip-fee" x="8" y="15"></text><text class="burn-tip-time" x="8" y="28"></text></g>
+      <rect class="burn-hit" x="${L}" y="${T}" width="${plotW}" height="${base - T}"/>
+    </svg>`;
+    $("reg-total").innerHTML = "";
+    const total = document.createElement("b");
+    total.textContent = r.total.toLocaleString("en-US");
+    if (r.partial) {
+      const [got, need] = r.progress;
+      $("reg-total").append(`Loading older days ${Math.round((got / need) * 100)}% · so far `, total);
+    } else {
+      $("reg-total").append(r.complete ? "Total " : "At least ", total);
+    }
+
+    const svg = container.querySelector("svg"), tip = svg.querySelector(".burn-tip");
+    const tipFee = svg.querySelector(".burn-tip-fee"), tipTime = svg.querySelector(".burn-tip-time");
+    const hit = svg.querySelector(".burn-hit");
+    let on = -1;
+    const move = (clientX) => {
+      const rect = svg.getBoundingClientRect(), sx = (clientX - rect.left) * (W / rect.width);
+      const i = Math.max(0, Math.min(n - 1, Math.floor((sx - L) / slot)));
+      if (on >= 0) svg.querySelector(`.reg-bar[data-i="${on}"]`)?.classList.remove("on");
+      const dd = days[i], cx = L + i * slot + slot / 2;
+      const bar = svg.querySelector(`.reg-bar[data-i="${i}"]`);
+      if (bar) { bar.classList.add("on"); on = i; }
+      tipFee.textContent = dd.count == null ? "Loading…"
+        : `${dd.count.toLocaleString("en-US")} registration${dd.count === 1 ? "" : "s"}`;
+      tipTime.textContent = dayLabel(dd.date, { weekday: "short", month: "short", day: "numeric" }) + (i === n - 1 ? " · so far" : "");
+      let tx = cx + 10;
+      if (tx + 150 > W - R) tx = cx - 160;
+      tip.setAttribute("transform", `translate(${tx.toFixed(1)},${T + 2})`);
+      tip.style.display = "";
+    };
+    hit.addEventListener("mousemove", (e) => move(e.clientX));
+    hit.addEventListener("mouseleave", () => {
+      tip.style.display = "none";
+      if (on >= 0) svg.querySelector(`.reg-bar[data-i="${on}"]`)?.classList.remove("on");
+      on = -1;
+    });
+    hit.addEventListener("touchstart", (e) => { if (e.touches[0]) move(e.touches[0].clientX); }, { passive: true });
+    hit.addEventListener("touchmove", (e) => { if (e.touches[0]) move(e.touches[0].clientX); }, { passive: true });
   }
 
   async function load(card) {
@@ -1615,6 +1743,7 @@
     clearTimeout(burnResize);
     burnResize = setTimeout(() => {
       if ($("burn-dialog").open && burnData) renderBurnChart($("burn-chart"), burnData);
+      if ($("burn-dialog").open && regData) renderRegBars($("reg-bars"), regData);
     }, 150);
   });
   // Click on the backdrop (outside the dialog box) closes any modal.
