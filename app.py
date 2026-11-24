@@ -21,6 +21,8 @@ import os
 import re
 import secrets
 import time
+from collections import Counter
+from decimal import Decimal
 from concurrent.futures import ProcessPoolExecutor
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -49,7 +51,7 @@ PRICE_HISTORY_CONCURRENCY = 6  # few at a time: the public archive drops bursts,
 PRICE_HISTORY_READ_TIMEOUT = 20  # per attempt
 PRICE_HISTORY_RETRIES = 3  # the archive is flaky; retry a dropped point before giving up
 PRICE_HISTORY_WARM_INTERVAL = 1200  # 20 min: rebuild the shared history before its cache expires
-BURN_HISTORY_POINTS = 48  # ~every 30 min over the last day; one archive read per point for the one subnet
+BURN_SNAPSHOT_MIN_STEP = 300  # metagraph snapshots at most every 300 blocks (24/day) for a short immunity period
 BURN_HISTORY_TTL = 600  # 10 min: the registration fee moves slowly, and each build is a burst of reads
 STATIC_DIR = Path(__file__).parent / "static"
 
@@ -320,35 +322,98 @@ async def warm_price_history(client) -> None:
         await asyncio.sleep(PRICE_HISTORY_WARM_INTERVAL)
 
 
-async def build_burn_history(client, netuid: int) -> list[dict]:
-    """One subnet's registration fee (burn) over the last day; oldest first.
+async def build_burn_history(client, netuid: int) -> dict:
+    """The registration fee (burn) over the last day, at every block — rebuilt, not sampled.
 
-    The burn is per-subnet, so unlike the price sweep this is one archive read per
-    sample — a few dozen reads for the one subnet, built on demand when its graph is
-    opened. Each kept point carries its own age, so a dropped read just leaves a gap
-    rather than shifting the rest of the line in time.
+    The chain's burn is deterministic. Each block it decays by 2**(-1/BurnHalfLife)
+    (a half-life of 360 blocks halves it every 360), rounded down; each registration
+    multiplies it by BurnIncreaseMult (x1.26 on SN70, x1.05 on SN24); and it is held
+    between MinBurn and MaxBurn. So the whole day follows from the burn at its start
+    plus the blocks neurons registered in. That is the per-block series TaoMarketCap
+    charts, and it matches theirs block for block.
+
+    Registration blocks come from metagraph snapshots spaced a little under the
+    immunity period: a fresh UID can't be replaced until its immunity ends, so every
+    registration in the window shows up in at least one snapshot. The rebuilt last
+    value is checked against the live burn ("exact").
     """
     now = await client.block()
-    step = BLOCKS_PER_DAY // (BURN_HISTORY_POINTS - 1)
-    blocks = [now - BLOCKS_PER_DAY + i * step for i in range(BURN_HISTORY_POINTS)]
+    start = now - BLOCKS_PER_DAY
+    head, then = await asyncio.gather(client.at(now), client.at(start))
+    hl, mult, min_burn, max_burn, burn_now, now_ms, graph = await asyncio.gather(
+        head.query(storage.SubtensorModule.BurnHalfLife, [netuid]),
+        head.query(storage.SubtensorModule.BurnIncreaseMult, [netuid]),
+        head.query(storage.SubtensorModule.MinBurn, [netuid]),
+        head.query(storage.SubtensorModule.MaxBurn, [netuid]),
+        head.query(storage.SubtensorModule.Burn, [netuid]),
+        head.query(storage.Timestamp.Now),
+        head.runtime(SubnetInfoRuntimeApi.get_metagraph, [netuid]),
+    )
+    if not isinstance(graph, dict):
+        raise HTTPException(404, f"Subnet {netuid} does not exist")
 
     gate = asyncio.Semaphore(PRICE_HISTORY_CONCURRENCY)
 
-    async def sample(block: int):
+    async def archived(read):  # an archive read, retried: the public archive drops some
         async with gate:
             for attempt in range(PRICE_HISTORY_RETRIES):
                 try:
-                    head = await client.at(block)
-                    fee = await asyncio.wait_for(head.subnets.burn(netuid), PRICE_HISTORY_READ_TIMEOUT)
-                    return fee.tao
+                    return await asyncio.wait_for(read(), PRICE_HISTORY_READ_TIMEOUT)
                 except Exception:
+                    if attempt == PRICE_HISTORY_RETRIES - 1:
+                        raise
                     await asyncio.sleep(0.3 * (attempt + 1))
-            return None
 
-    fees = await asyncio.gather(*(sample(b) for b in blocks))
-    # "h" is hours before now (12 s/block); the newest point sits at ~0h.
-    return [{"h": round((now - block) * 12 / 3600, 3), "tao": fee}
-            for block, fee in zip(blocks, fees) if fee is not None]
+    immunity = int(graph["immunity_period"])
+    step = max(BURN_SNAPSHOT_MIN_STEP, immunity - 100)
+    snapshot_blocks = list(range(now - step, start, -step))
+
+    async def metagraph_at(block):
+        return await (await client.at(block)).runtime(SubnetInfoRuntimeApi.get_metagraph, [netuid])
+
+    burn_start, start_ms, *older = await asyncio.gather(
+        archived(lambda: then.query(storage.SubtensorModule.Burn, [netuid])),
+        archived(lambda: then.query(storage.Timestamp.Now)),
+        *(archived(lambda b=b: metagraph_at(b)) for b in snapshot_blocks),
+    )
+
+    registrations: Counter[int] = Counter()  # block -> neurons registered in it
+    seen = set()
+    for g in [graph, *older]:
+        for uid, block in enumerate(g["block_at_registration"]):
+            if start < block <= now and (uid, block) not in seen:
+                seen.add((uid, block))
+                registrations[block] += 1
+
+    # Integer math as the chain does it: the decay factor as I32F32 rounded to nearest,
+    # the multiplier as its stored U64F64 bits, each step rounded down and clamped to
+    # [MinBurn, MaxBurn]. (Truncating the factor instead drifts a rao or two at some
+    # half-lives, e.g. SN24's 120 blocks.)
+    hl = int(hl)
+    decay_bits = int((Decimal(2) ** (Decimal(-1) / hl) * (1 << 32)).to_integral_value()) if hl > 0 else 1 << 32
+    mult_bits = int(mult["bits"] if isinstance(mult, dict) else mult)
+    lo, hi = int(min_burn), int(max_burn)
+    x = int(burn_start)
+    series = [x]
+    for block in range(start + 1, now + 1):
+        x = max(lo, min(hi, (x * decay_bits) >> 32))
+        for _ in range(registrations[block]):
+            x = max(lo, min(hi, (x * mult_bits) >> 64))
+        series.append(x)
+
+    return {
+        "start_block": start,
+        "end_block": now,
+        "start_ms": int(start_ms),  # chain time of the first and last block, for clock labels
+        "end_ms": int(now_ms),
+        "burn": series,  # rao, one value per block from start_block to end_block
+        "registrations": sorted(registrations),
+        "min_tao": lo / RAO_PER_UNIT,
+        "max_tao": hi / RAO_PER_UNIT,
+        "half_life": hl,
+        "mult": mult_bits / 2**64,
+        "exact": abs(series[-1] - int(burn_now)) <= 2,  # a rao or two of rounding is fine
+    }
 
 
 async def subnet_summary(client, netuid: int) -> dict:
@@ -556,7 +621,7 @@ async def get_burn_history(netuid: int = PathParam(ge=1, le=65535)):
     try:
         history = await cached(("burn1d", netuid), BURN_HISTORY_TTL,
                                lambda: build_burn_history(app.state.client, netuid))
-        return {"netuid": netuid, "history_1d": history}
+        return {"netuid": netuid, **history}
     except HTTPException:
         raise
     except Exception as e:

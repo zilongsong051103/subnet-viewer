@@ -190,18 +190,21 @@
   .login-actions .primary:hover { background: var(--accent); filter: brightness(1.08); box-shadow: var(--shadow-8); }
   .login-actions button:disabled { opacity: 0.5; cursor: default; box-shadow: none; }
   /* The registration-fee burn graph, opened from the Reg fee group. */
-  .burn-dialog { width: min(600px, calc(100vw - 48px)); }
+  .burn-dialog { width: min(1040px, calc(100vw - 48px)); }
   .burn-sub { margin: -4px 0 12px; color: var(--ink-2); font-size: 0.875rem; }
   /* Pull the chart out to the dialog's action-row edges (16px) so it lines up with the Close button. */
-  .burn-chart { min-height: 200px; display: grid; place-items: center; margin-inline: -8px; }
+  .burn-chart { min-height: 340px; display: grid; place-items: center; margin-inline: -8px; }
   .burn-chart svg { width: 100%; height: auto; display: block; }
   .burn-msg { color: var(--ink-2); margin: 0; padding: 56px 0; }
-  .burn-axis { fill: var(--ink-2); font-size: 10px; }
+  .burn-axis { fill: var(--ink-2); font-size: 11px; }
   .burn-grid { stroke: var(--divider); stroke-width: 1; }
-  .burn-area { fill: var(--accent-soft); }
-  .burn-line { fill: none; stroke: var(--accent); stroke-width: 2; vector-effect: non-scaling-stroke; }
-  .burn-dot { fill: var(--accent); }
-  .burn-val { fill: var(--ink); font-size: 11px; font-weight: 600; }
+  /* Drawn the way TaoMarketCap charts it: a thin line through every block, no fill. */
+  .burn-line { fill: none; stroke: #c5628a; stroke-width: 1.5; stroke-linejoin: round; }
+  .burn-dot { fill: #c5628a; }
+  .burn-min { stroke: var(--ink-2); stroke-width: 1; stroke-dasharray: 4 3; }
+  .burn-min-label { fill: var(--ink-2); font-size: 10px; }
+  .burn-now rect { fill: var(--surface); stroke: var(--ink-2); }
+  .burn-now text { fill: var(--ink); font-size: 10.5px; font-weight: 600; }
   .burn-hit { fill: transparent; cursor: crosshair; }
   .burn-crosshair { stroke: var(--ink-2); stroke-width: 1; stroke-dasharray: 3 3; }
   .burn-tip rect { fill: var(--surface); stroke: var(--ink-2); }
@@ -392,7 +395,7 @@
   .ck { text-decoration: none; cursor: pointer; }
   .ck:not(.labeled):hover { text-decoration: underline; }
   .ck.labeled {
-    min-width: 0; max-width: 110px; font-family: inherit; font-weight: 500; color: cornflowerblue;
+    min-width: 0; max-width: 84px; font-family: inherit; font-weight: 500; color: cornflowerblue;
     overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   }
   /* A gloss sweeps across the cornflowerblue label so it "shines"; falls back to solid
@@ -415,6 +418,7 @@
     font-size: 12px; line-height: 1; padding: 2px 3px; border-radius: 4px;
   }
   .ck-edit:hover { background: var(--hairline); color: var(--ink); }
+  .ck-count { flex: none; margin-left: 2px; color: var(--ink-2); font-size: 12px; font-variant-numeric: tabular-nums; cursor: default; }
   .ck-addr { font: 13px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; color: var(--ink-2); word-break: break-all; }
   @media (hover: hover) {
     .ck-edit { opacity: 0; transition: opacity 0.15s; }
@@ -734,8 +738,8 @@
   const share = (part, whole) => {
     if (!whole) return "—";
     const pct = (part / whole) * 100;
-    // Whole percents; an earning miner never reads as 0%.
-    return pct > 0 && pct < 0.5 ? "<1%" : `${Math.round(pct)}%`;
+    // One decimal (2.1%, 99.9%); an earning miner never reads as 0.0%.
+    return pct > 0 && pct < 0.05 ? "<0.1%" : `${pct.toFixed(1)}%`;
   };
   // Compact TAO for owner amounts: "1.96k τ", "43.32k τ", "1.20M τ", "0.18 τ".
   const kTao = (v) => {
@@ -833,7 +837,7 @@
     link.classList.toggle("labeled", !!label);
     link.title = (label ? `${label}\n${address}` : address) + "\nOpen this account on Taostats";
   }
-  function coldkeyCell(address) {
+  function coldkeyCell(address, hotkeys = 1) {
     const wrap = document.createElement("span");
     wrap.className = "ck-cell";
     const key = document.createElement("a");
@@ -850,13 +854,22 @@
     edit.title = labels.has(address) ? "Edit this coldkey's label" : "Label this coldkey";
     edit.setAttribute("aria-label", edit.title);
     edit.addEventListener("click", () => openLabelDialog(address));
-    wrap.append(key, edit);
+    wrap.append(key);
+    // How many of this subnet's listed miners run under this coldkey, when more than one.
+    if (hotkeys > 1) {
+      const count = document.createElement("span");
+      count.className = "ck-count";
+      count.textContent = `×${hotkeys}`;
+      count.title = `${hotkeys} hotkeys from this coldkey on this subnet`;
+      wrap.append(count);
+    }
+    wrap.append(edit);
     return wrap;
   }
   function refreshColdkeyLabels(address) {
     document.querySelectorAll(`.ck[data-coldkey="${CSS.escape(address)}"]`).forEach(paintColdkey);
     document.querySelectorAll(`.ck-cell .ck[data-coldkey="${CSS.escape(address)}"]`).forEach((key) => {
-      const edit = key.nextElementSibling;
+      const edit = key.parentElement.querySelector(".ck-edit");
       if (edit) {
         edit.title = labels.has(address) ? "Edit this coldkey's label" : "Label this coldkey";
         edit.setAttribute("aria-label", edit.title);
@@ -875,7 +888,7 @@
     input.select();
   }
 
-  function minerRow(miner, fullRecordedTao, fullConsensus) {
+  function minerRow(miner, fullRecordedTao, fullConsensus, hotkeys) {
     const tr = document.createElement("tr");
     const cell = (content, cls) => {
       const td = document.createElement("td");
@@ -894,7 +907,7 @@
     uid.setAttribute("aria-label", `UID ${miner.uid}. ${uid.title}`);
 
     cell(keyButton(miner.hotkey));
-    cell(coldkeyCell(miner.coldkey));
+    cell(coldkeyCell(miner.coldkey, hotkeys));
     cell(miner.balance_tao == null ? "—" : kNum(miner.balance_tao), "num");
     tr.lastElementChild.title = miner.balance_tao == null
       ? "The balance read didn't come back in time"
@@ -1080,7 +1093,10 @@
     // Every card is MINER_ROWS tall. A subnet with fewer active miners pads out with
     // empty rows — each a full set of cells, so the columns and row-lines carry on —
     // instead of leaving a blank gap above the totals; more miners scroll (max-height).
-    const rows = d.top_miners.map((m) => minerRow(m, d.miner_burn.full_recorded_daily_tao, fullConsensus));
+    const hotkeysOf = new Map(); // coldkey -> how many listed miners it runs here
+    for (const m of d.top_miners) hotkeysOf.set(m.coldkey, (hotkeysOf.get(m.coldkey) || 0) + 1);
+    const rows = d.top_miners.map((m) =>
+      minerRow(m, d.miner_burn.full_recorded_daily_tao, fullConsensus, hotkeysOf.get(m.coldkey)));
     for (let i = rows.length; i < MINER_ROWS; i++) {
       const tr = document.createElement("tr");
       tr.className = "pad";
@@ -1248,108 +1264,149 @@
   }
 
   // The registration-fee (burn) graph over the last day, opened from the Reg fee group.
-  let burnReq = 0;
+  let burnReq = 0, burnData = null;
   function openBurnChart(netuid) {
     const dlg = $("burn-dialog");
     $("burn-sub").textContent = subnetLabel(netuid);
     const chart = $("burn-chart");
     chart.innerHTML = '<p class="burn-msg">Loading…</p>';
+    burnData = null; // a resize mid-load must not redraw the previous subnet's graph
     dlg.showModal();
     const req = ++burnReq;
-    getJSON(`/api/subnets/${netuid}/burn-1d`).then(({ history_1d }) => {
+    getJSON(`/api/subnets/${netuid}/burn-1d`).then((d) => {
       if (req !== burnReq) return; // a newer open (or a close) supersedes this one
-      if (history_1d && history_1d.length >= 2) renderBurnChart(chart, history_1d);
-      else chart.innerHTML = '<p class="burn-msg">Not enough burn history to graph.</p>';
+      if (!d.burn || d.burn.length < 2) {
+        chart.innerHTML = '<p class="burn-msg">Not enough burn history to graph.</p>';
+        return;
+      }
+      if (!d.exact) $("burn-sub").textContent += " · approximate";
+      burnData = d;
+      renderBurnChart(chart, d);
     }).catch(() => {
       if (req === burnReq) chart.innerHTML = '<p class="burn-msg">Couldn’t load the burn history.</p>';
     });
   }
-  const feeText = (v) => "τ" + parseFloat(v.toPrecision(3));
-  const agoText = (hours) => {
-    const m = Math.round(hours * 60);
-    if (m <= 0) return "now";
-    const hh = Math.floor(m / 60), mm = m % 60;
-    return hh ? `${hh}h${mm ? ` ${mm}m` : ""} ago` : `${mm}m ago`;
-  };
-  // Draws the day's fee as a smooth line with gridlines, then wires a hover readout.
-  // Each point carries its own age ("h" hours ago), so x is time, not sample index.
-  function renderBurnChart(container, data) {
-    const W = 600, H = 250, L = 56, R = 18, T = 18, B = 30, base = H - B;
-    const vals = data.map((p) => p.tao);
-    const lo = Math.min(...vals), hi = Math.max(...vals);
-    const padV = (hi - lo) * 0.15 || hi * 0.1 || 0.001;
-    const yMin = Math.max(0, lo - padV), yMax = hi + padV;
-    const x = (h) => L + (1 - h / 24) * (W - L - R);   // 24h ago at the left, now at the right
-    const y = (v) => T + (1 - (v - yMin) / ((yMax - yMin) || 1)) * (base - T);
-    const pts = data.map((p) => [x(p.h), y(p.tao)]);
-    let line = `M${pts[0][0].toFixed(1)},${pts[0][1].toFixed(1)}`;
-    for (let i = 0; i < pts.length - 1; i++) {
-      const p0 = pts[i - 1] || pts[i], p1 = pts[i], p2 = pts[i + 1], p3 = pts[i + 2] || pts[i + 1];
-      const c1x = p1[0] + (p2[0] - p0[0]) / 6, c1y = p1[1] + (p2[1] - p0[1]) / 6;
-      const c2x = p2[0] - (p3[0] - p1[0]) / 6, c2y = p2[1] - (p3[1] - p1[1]) / 6;
-      line += `C${c1x.toFixed(1)},${c1y.toFixed(1)} ${c2x.toFixed(1)},${c2y.toFixed(1)} ${p2[0].toFixed(1)},${p2[1].toFixed(1)}`;
+  const burnTau = (v, digits) => "τ" + parseFloat(v.toPrecision(digits));
+  const clock = (ms) => new Date(ms).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hour12: false });
+  // A round tick step (1, 2, 2.5 or 5 x 10^k) at least as large as raw.
+  function niceStep(raw) {
+    const mag = 10 ** Math.floor(Math.log10(raw || 1e-9));
+    return [1, 2, 2.5, 5, 10].map((f) => f * mag).find((v) => v >= raw);
+  }
+  // The day's burn at every block (rao, d.burn[i] for block start_block + i), as a
+  // straight-segment line like TaoMarketCap's, with the min-burn floor dashed, the
+  // live value boxed on the right axis, and an exact per-block hover readout.
+  function renderBurnChart(container, d) {
+    // Drawn 1:1 at the dialog's width (text stays its true size; a wider plot gives
+    // fewer blocks per pixel), about 0.42 as tall, kept on screen.
+    const W = Math.max(320, Math.round(container.clientWidth));
+    const H = Math.round(Math.max(240, Math.min(470, W * 0.42, innerHeight - 230)));
+    const L = 8, R = 70, T = 12, B = 28, base = H - B, plotW = W - L - R;
+    const vals = d.burn.map((r) => r / 1e9), n = vals.length, last = vals[n - 1];
+    // Scale to the day's own range, as TaoMarketCap does: the floor (the fee never drops
+    // below MinBurn) sits padB above the bottom and the peak padT below the top, so a
+    // subnet idling at a high floor (SN24 at τ0.1) still fills the height with its spikes.
+    const lo = Math.min(d.min_tao, ...vals);
+    let hi = Math.max(...vals);
+    if (hi - lo <= lo * 1e-6) hi = lo * 1.05 || 1e-9;                // flat all day: some headroom
+    const padT = 10, padB = 22, floorY = base - padB, peakY = T + padT;
+    const x = (i) => L + (i / (n - 1)) * plotW;
+    const y = (v) => floorY - ((v - lo) / (hi - lo)) * (floorY - peakY);
+    const valueAt = (py) => lo + ((floorY - py) / (floorY - peakY)) * (hi - lo);
+    const step = niceStep((valueAt(T) - valueAt(base)) / 6);
+    const timeOf = (i) => d.start_ms + (i / (n - 1)) * (d.end_ms - d.start_ms);
+
+    // Thousands of blocks over a few hundred pixels: keep each pixel column's first,
+    // lowest, highest and last point, in order — the drawn line is pixel-identical.
+    const keep = [];
+    for (let i = 0, col = -1, lo, hi, first; i < n; i++) {
+      const c = Math.floor(x(i));
+      if (c !== col) {
+        if (col >= 0) keep.push(first, lo, hi, i - 1);
+        col = c; first = lo = hi = i;
+      }
+      if (vals[i] < vals[lo]) lo = i;
+      if (vals[i] > vals[hi]) hi = i;
+      if (i === n - 1) keep.push(first, lo, hi, i);
     }
-    const area = `M${pts[0][0].toFixed(1)},${base}L${line.slice(1)}L${pts[pts.length - 1][0].toFixed(1)},${base}Z`;
+    const idx = [...new Set(keep)].sort((a, b) => a - b);
+    const line = idx.map((i, k) => `${k ? "L" : "M"}${x(i).toFixed(1)},${y(vals[i]).toFixed(1)}`).join("");
+
     let grid = "", yLabels = "";
-    for (let g = 0; g <= 4; g++) {                     // five horizontal gridlines + labels
-      const v = yMin + (yMax - yMin) * g / 4, yy = y(v).toFixed(1);
+    for (let k = Math.floor(lo / step) + 1; k * step <= valueAt(T); k++) {  // ticks above the floor
+      const v = k * step, yy = y(v).toFixed(1);
       grid += `<line class="burn-grid" x1="${L}" y1="${yy}" x2="${W - R}" y2="${yy}"/>`;
-      yLabels += `<text class="burn-axis" x="${L - 6}" y="${(y(v) + 3).toFixed(1)}" text-anchor="end">${feeText(v)}</text>`;
+      yLabels += `<text class="burn-axis" x="${W - R + 6}" y="${(y(v) + 3).toFixed(1)}">${burnTau(v, 4)}</text>`;
     }
+    // Clock labels on round hours, every 3 h across the day.
     let xLabels = "";
-    for (const ha of [24, 18, 12, 6, 0]) {             // time ticks across the day
-      const xx = x(ha), anchor = ha === 24 ? "start" : ha === 0 ? "end" : "middle";
-      xLabels += `<text class="burn-axis" x="${xx.toFixed(1)}" y="${H - 8}" text-anchor="${anchor}">${ha ? `-${ha}h` : "now"}</text>`;
+    const hourMs = 3600e3, spanMs = d.end_ms - d.start_ms;
+    const stepMs = [1, 1.5, 2, 3, 4, 6].map((h) => h * hourMs).find((ms) => (ms / spanMs) * plotW >= 64) || 6 * hourMs;
+    for (let t = Math.ceil(d.start_ms / stepMs) * stepMs; t < d.end_ms; t += stepMs) {
+      const i = ((t - d.start_ms) / (d.end_ms - d.start_ms)) * (n - 1), xx = x(i);
+      if (xx < L + 14 || xx > W - R - 14) continue;
+      xLabels += `<text class="burn-axis" x="${xx.toFixed(1)}" y="${H - 8}" text-anchor="middle">${clock(t)}</text>`;
     }
-    container.innerHTML = `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="Registration fee over the last 24 hours">
+    const yMin = y(d.min_tao);
+    const nowY = Math.min(base - 9, Math.max(T + 9, y(last)));
+
+    container.innerHTML = `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="Registration fee at every block over the last 24 hours">
       ${grid}
-      <path class="burn-area" d="${area}"/>
+      <line class="burn-grid" x1="${L}" y1="${base}" x2="${W - R}" y2="${base}"/>
+      <line class="burn-min" x1="${L}" y1="${yMin.toFixed(1)}" x2="${W - R}" y2="${yMin.toFixed(1)}"/>
+      <text class="burn-min-label" x="${L + 4}" y="${(yMin + 13).toFixed(1)}">Min burn ${burnTau(d.min_tao, 4)}</text>
       <path class="burn-line" d="${line}"/>
       ${yLabels}${xLabels}
+      <g class="burn-now">
+        <rect x="${W - R + 2}" y="${(nowY - 9).toFixed(1)}" width="${R - 4}" height="18" rx="3"/>
+        <text x="${W - R / 2}" y="${(nowY + 3.5).toFixed(1)}" text-anchor="middle">${burnTau(last, 4)}</text>
+      </g>
       <g class="burn-cursor" style="display:none">
         <line class="burn-crosshair" x1="0" x2="0" y1="${T}" y2="${base}"/>
         <circle class="burn-dot burn-cdot" r="3.5"/>
       </g>
       <g class="burn-tip" style="display:none">
-        <rect rx="4" width="92" height="34"/>
+        <rect rx="4" width="150" height="34"/>
         <text class="burn-tip-fee" x="8" y="15"></text>
         <text class="burn-tip-time" x="8" y="28"></text>
       </g>
-      <rect class="burn-hit" x="${L}" y="${T}" width="${W - L - R}" height="${base - T}"/>
+      <rect class="burn-hit" x="${L}" y="${T}" width="${plotW}" height="${base - T}"/>
     </svg>`;
 
     const svg = container.querySelector("svg");
-    const cursor = svg.querySelector(".burn-cursor");
-    const cLine = svg.querySelector(".burn-crosshair");
-    const cDot = svg.querySelector(".burn-cdot");
-    const tip = svg.querySelector(".burn-tip");
-    const tipFee = svg.querySelector(".burn-tip-fee");
-    const tipTime = svg.querySelector(".burn-tip-time");
+    const cursor = svg.querySelector(".burn-cursor"), cLine = svg.querySelector(".burn-crosshair");
+    const cDot = svg.querySelector(".burn-cdot"), tip = svg.querySelector(".burn-tip");
+    const tipFee = svg.querySelector(".burn-tip-fee"), tipTime = svg.querySelector(".burn-tip-time");
+    const regs = new Set(d.registrations || []);
     const hit = svg.querySelector(".burn-hit");
-    const move = (clientX) => {
+    const move = (clientX, clientY) => {
       const rect = svg.getBoundingClientRect();
-      const sx = (clientX - rect.left) / rect.width * W;          // viewBox x from screen x
-      let i = 0, best = Infinity;                                 // nearest point by x
-      for (let k = 0; k < pts.length; k++) {
-        const d = Math.abs(pts[k][0] - sx);
-        if (d < best) { best = d; i = k; }
+      const ux = W / rect.width;                                     // viewBox units per screen pixel
+      const sx = (clientX - rect.left) * ux, sy = (clientY - rect.top) * (H / rect.height);
+      // A screen pixel spans ~a dozen blocks, and a registration can jump the fee inside
+      // one. Of the blocks under the pointer, take the one plotted nearest it vertically:
+      // the top of a spike reads the spike, its foot reads the foot.
+      const at = ((sx - L) / plotW) * (n - 1), span = Math.max(1, (ux / plotW) * (n - 1));
+      let i = Math.max(0, Math.min(n - 1, Math.round(at)));
+      for (let k = Math.max(0, Math.floor(at - span)); k <= Math.min(n - 1, Math.ceil(at + span)); k++) {
+        if (Math.abs(y(vals[k]) - sy) < Math.abs(y(vals[i]) - sy)) i = k;
       }
-      const [cx, cy] = pts[i];
+      const cx = x(i), cy = y(vals[i]), block = d.start_block + i;
       cLine.setAttribute("x1", cx.toFixed(1)); cLine.setAttribute("x2", cx.toFixed(1));
       cDot.setAttribute("cx", cx.toFixed(1)); cDot.setAttribute("cy", cy.toFixed(1));
       cursor.style.display = "";
-      tipFee.textContent = feeText(data[i].tao);
-      tipTime.textContent = agoText(data[i].h);
-      let tx = cx + 10, ty = cy - 42;                            // tooltip above-right, kept in bounds
-      if (tx + 92 > W - R) tx = cx - 102;
+      tipFee.textContent = burnTau(vals[i], 6) + (regs.has(block) ? "  ▲ registration" : "");
+      tipTime.textContent = `${clock(timeOf(i))} · block ${block.toLocaleString("en-US")}`;
+      let tx = cx + 10, ty = cy - 42;                                  // above-right, kept in bounds
+      if (tx + 150 > W - R) tx = cx - 160;
       if (ty < T) ty = cy + 8;
       tip.setAttribute("transform", `translate(${tx.toFixed(1)},${ty.toFixed(1)})`);
       tip.style.display = "";
     };
-    hit.addEventListener("mousemove", (e) => move(e.clientX));
+    hit.addEventListener("mousemove", (e) => move(e.clientX, e.clientY));
     hit.addEventListener("mouseleave", () => { cursor.style.display = "none"; tip.style.display = "none"; });
-    hit.addEventListener("touchstart", (e) => { if (e.touches[0]) move(e.touches[0].clientX); }, { passive: true });
-    hit.addEventListener("touchmove", (e) => { if (e.touches[0]) move(e.touches[0].clientX); }, { passive: true });
+    hit.addEventListener("touchstart", (e) => { if (e.touches[0]) move(e.touches[0].clientX, e.touches[0].clientY); }, { passive: true });
+    hit.addEventListener("touchmove", (e) => { if (e.touches[0]) move(e.touches[0].clientX, e.touches[0].clientY); }, { passive: true });
   }
 
   async function load(card) {
@@ -1552,6 +1609,14 @@
   // Coldkey label editor: Save (or an empty box) stores/clears the label, Remove clears it.
   $("label-cancel").addEventListener("click", () => $("label-dialog").close());
   $("burn-close").addEventListener("click", () => { burnReq++; $("burn-dialog").close(); });
+  // The graph is drawn at the dialog's pixel size, so redraw it when the window resizes.
+  let burnResize;
+  addEventListener("resize", () => {
+    clearTimeout(burnResize);
+    burnResize = setTimeout(() => {
+      if ($("burn-dialog").open && burnData) renderBurnChart($("burn-chart"), burnData);
+    }, 150);
+  });
   // Click on the backdrop (outside the dialog box) closes any modal.
   for (const id of ["burn-dialog", "label-dialog", "login"]) {
     $(id).addEventListener("click", (e) => {
