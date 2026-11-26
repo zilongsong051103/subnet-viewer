@@ -133,6 +133,17 @@
   @keyframes brand-spin { to { transform: rotate(1turn); } }
   @media (prefers-reduced-motion: reduce) { .brand::before { animation: none; } }
   .navlinks { display: flex; gap: 2px; }
+  /* TAO's USD price beside the page links: a quiet chip, its 24h change in green or red. */
+  .tao-price {
+    display: inline-flex; align-items: baseline; gap: 6px; padding: 3px 10px; border-radius: 16px;
+    background: var(--hairline); color: var(--ink); font-size: 0.8125rem; text-decoration: none; white-space: nowrap;
+    font-variant-numeric: tabular-nums;
+  }
+  .tao-price:hover { background: var(--divider); }
+  .tao-price .tao-name { color: var(--ink-2); font-size: 0.75rem; }
+  .tao-price b { font-weight: 600; }
+  .tao-price .up { color: var(--good); }
+  .tao-price .down { color: var(--bad); }
   /* Material's text button; the page you are on is marked the way tabs are. */
   .navbtn {
     display: inline-flex; align-items: center; white-space: nowrap;
@@ -361,6 +372,21 @@
      opaque background keeps rows from showing through (the table collapses borders,
      so an inset shadow draws the divider that a sticky cell border wouldn't keep). */
   thead th { position: sticky; top: 0; z-index: 2; background: var(--surface); border-bottom: 0; box-shadow: inset 0 -1px 0 var(--divider); }
+  /* Each header sorts the card's miners: one click for its natural order, another to flip.
+     The arrow hangs into the padding beside the label, so sorting never moves a column. */
+  th .sort {
+    position: relative; margin: 0; padding: 0; border: 0; background: none; cursor: pointer;
+    font: inherit; line-height: inherit; letter-spacing: inherit; color: inherit;
+  }
+  th .sort:hover { color: var(--ink); }
+  th .sort:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 2px; }
+  thead th[aria-sort] { z-index: 3; color: var(--ink); } /* above its neighbour, whose padding the arrow overhangs */
+  th[aria-sort] .sort::after {
+    content: "▼"; position: absolute; left: 100%; top: 50%; transform: translateY(-50%);
+    margin-left: 2px; color: var(--accent); font-size: 8px;
+  }
+  th[aria-sort="ascending"] .sort::after { content: "▲"; }
+  th:last-child[aria-sort] .sort::after { left: auto; right: 100%; margin: 0 2px 0 0; } /* no padding to its right */
   tfoot td { position: sticky; bottom: 0; z-index: 2; background: var(--surface); }
   /* The week's alpha price, drawn faintly behind the card header (always there,
      even for a subnet with no miners and so an empty table). */
@@ -524,6 +550,9 @@
     <a class="navbtn current" href="/" aria-current="page">Dashboard</a>
     <a class="navbtn" id="seed-lab-link" href="/seed-lab">Seed Lab</a>
   </nav>
+  <a class="tao-price" id="tao-price" href="https://www.coingecko.com/en/coins/bittensor" target="_blank" rel="noopener noreferrer" hidden>
+    <span class="tao-name">TAO</span><b id="tao-usd"></b><span id="tao-change"></span>
+  </a>
   <div class="actions">
     <label for="netuid" class="visually-hidden">Subnet</label>
     <select id="netuid"><option value="">Loading…</option></select>
@@ -665,13 +694,13 @@
         <table>
           <thead>
             <tr>
-              <th scope="col" class="num" title="Green: can be deregistered. Brown: immune">UID</th>
-              <th scope="col">Hotkey</th>
-              <th scope="col">Coldkey</th>
-              <th scope="col" class="num" title="What the coldkey holds in total: free TAO plus all its stake valued in TAO">Balance</th>
-              <th scope="col" class="num" title="How long ago this hotkey registered on the subnet. Not the same as how long it has been earning, which the chain does not record">Age</th>
-              <th scope="col" class="num" title="Each miner's share of the subnet's incentive, from the chain's consensus ranking — the figure Taostats shows. Hover a cell for its share of emission instead">Incentive</th>
-              <th scope="col" class="num" title="What this miner earns a day at its current weights: its share of the miners' slice of the subnet's alpha emission (the split read live from the chain, shown below the table). Hover a cell to see what the chain last recorded paying">Daily TAO</th>
+              <th scope="col" class="num" title="Green: can be deregistered. Brown: immune"><button type="button" class="sort" data-sort="uid">UID</button></th>
+              <th scope="col"><button type="button" class="sort" data-sort="hotkey">Hotkey</button></th>
+              <th scope="col"><button type="button" class="sort" data-sort="coldkey">Coldkey</button></th>
+              <th scope="col" class="num" title="What the coldkey holds in total: free TAO plus all its stake valued in TAO"><button type="button" class="sort" data-sort="balance">Balance</button></th>
+              <th scope="col" class="num" title="How long ago this hotkey registered on the subnet. Not the same as how long it has been earning, which the chain does not record"><button type="button" class="sort" data-sort="age">Age</button></th>
+              <th scope="col" class="num" title="Each miner's share of the subnet's incentive, from the chain's consensus ranking — the figure Taostats shows. Hover a cell for its share of emission instead"><button type="button" class="sort" data-sort="incentive">Incentive</button></th>
+              <th scope="col" class="num" title="What this miner earns a day at its current weights: its share of the miners' slice of the subnet's alpha emission (the split read live from the chain, shown below the table). Hover a cell to see what the chain last recorded paying"><button type="button" class="sort" data-sort="daily">Daily TAO</button></th>
             </tr>
           </thead>
           <tbody data-field="miners"></tbody>
@@ -964,6 +993,17 @@
     el.classList.add("pending"); // no data yet: skeleton until the first response
     card.field("title").textContent = subnetLabel(netuid);
     card.field("star").addEventListener("click", () => toggleWatch(netuid));
+    card.sort = { key: "daily", dir: "desc" }; // the order the chain's ranking lists them in
+    for (const btn of el.querySelectorAll("th .sort")) {
+      btn.addEventListener("click", () => {
+        const key = btn.dataset.sort;
+        card.sort = card.sort.key === key
+          ? { key, dir: card.sort.dir === "asc" ? "desc" : "asc" }
+          : { key, dir: SORT_FIRST[key] };
+        renderMinerRows(card);
+        card.field("table").scrollTop = 0;
+      });
+    }
     // The Reg fee group opens a graph of the registration fee over the last day.
     const feeStat = card.field("fee-stat");
     feeStat.classList.add("tappable");
@@ -1022,6 +1062,55 @@
       layout();
       handle.focus();
     });
+  }
+
+  // A header's first click: names A→Z, low UIDs first; every figure largest first.
+  const SORT_FIRST = { uid: "asc", hotkey: "asc", coldkey: "desc", balance: "desc", age: "desc", incentive: "desc", daily: "desc" };
+
+  // The card's miner rows in its chosen order. Coldkey sorts by how many hotkeys the
+  // coldkey runs here, keeping each coldkey's together; ties fall back to the default
+  // order (daily TAO, then UID), and a missing figure (a balance that didn't load) sorts last.
+  function renderMinerRows(card) {
+    const d = card.data;
+    if (!d) return;
+    const hotkeysOf = new Map(); // coldkey -> how many listed miners it runs here
+    for (const m of d.top_miners) hotkeysOf.set(m.coldkey, (hotkeysOf.get(m.coldkey) || 0) + 1);
+    const { key, dir } = card.sort;
+    const value = {
+      uid: (m) => m.uid, hotkey: (m) => m.hotkey, coldkey: (m) => hotkeysOf.get(m.coldkey),
+      balance: (m) => m.balance_tao, age: (m) => m.age_blocks, incentive: (m) => m.consensus, daily: (m) => m.daily_tao,
+    }[key];
+    const sign = dir === "asc" ? 1 : -1;
+    const miners = [...d.top_miners].sort((a, b) => {
+      const va = value(a), vb = value(b);
+      if ((va == null) !== (vb == null)) return va == null ? 1 : -1;
+      if (va != null && va !== vb) return (typeof va === "string" ? va.localeCompare(vb) : va - vb) * sign;
+      if (key === "coldkey" && a.coldkey !== b.coldkey) return a.coldkey < b.coldkey ? -1 : 1;
+      return b.daily_tao - a.daily_tao || a.uid - b.uid;
+    });
+    const fullConsensus = d.miner_burn.full_consensus;
+    const rows = miners.map((m) =>
+      minerRow(m, d.miner_burn.full_recorded_daily_tao, fullConsensus, hotkeysOf.get(m.coldkey)));
+    // Every card is MINER_ROWS tall. A subnet with fewer active miners pads out with
+    // empty rows — each a full set of cells, so the columns and row-lines carry on —
+    // instead of leaving a blank gap above the totals; more miners scroll (max-height).
+    for (let i = rows.length; i < MINER_ROWS; i++) {
+      const tr = document.createElement("tr");
+      tr.className = "pad";
+      tr.setAttribute("aria-hidden", "true");
+      for (let c = 0; c < MINER_COLS; c++) {
+        const td = document.createElement("td");
+        td.textContent = "\u00A0"; // a non-breaking space gives the row a data row's height
+        tr.appendChild(td);
+      }
+      rows.push(tr);
+    }
+    card.field("miners").replaceChildren(...rows);
+    for (const btn of card.el.querySelectorAll("th .sort")) {
+      const th = btn.closest("th");
+      if (btn.dataset.sort === key) th.setAttribute("aria-sort", dir === "asc" ? "ascending" : "descending");
+      else th.removeAttribute("aria-sort");
+    }
   }
 
   function renderCard(card, d) {
@@ -1121,25 +1210,8 @@
     // Shares are of all miner emission, burned part included, so shares + Burn % ≈ 100%.
     const fullDailyAlpha = d.miner_burn.full_daily_alpha;
     const fullConsensus = d.miner_burn.full_consensus; // every miner, as the share's whole
-    // Every card is MINER_ROWS tall. A subnet with fewer active miners pads out with
-    // empty rows — each a full set of cells, so the columns and row-lines carry on —
-    // instead of leaving a blank gap above the totals; more miners scroll (max-height).
-    const hotkeysOf = new Map(); // coldkey -> how many listed miners it runs here
-    for (const m of d.top_miners) hotkeysOf.set(m.coldkey, (hotkeysOf.get(m.coldkey) || 0) + 1);
-    const rows = d.top_miners.map((m) =>
-      minerRow(m, d.miner_burn.full_recorded_daily_tao, fullConsensus, hotkeysOf.get(m.coldkey)));
-    for (let i = rows.length; i < MINER_ROWS; i++) {
-      const tr = document.createElement("tr");
-      tr.className = "pad";
-      tr.setAttribute("aria-hidden", "true");
-      for (let c = 0; c < MINER_COLS; c++) {
-        const td = document.createElement("td");
-        td.textContent = " "; // a non-breaking space gives the row a data row's height
-        tr.appendChild(td);
-      }
-      rows.push(tr);
-    }
-    f("miners").replaceChildren(...rows);
+    card.data = d;
+    renderMinerRows(card);
     const totals = d.miner_totals;
     // The list now holds every active miner, so the totals are simply the whole:
     // the miners' share of all emission (the whole counts burned emission too), and
@@ -1822,6 +1894,32 @@
 
   layout();
   loadSubnetList();
+</script>
+<script>
+  // TAO's USD price in the nav bar, from the server's cached market-data read; refreshed
+  // each minute, and simply left out if it can't be had.
+  (function () {
+    const chip = document.getElementById("tao-price");
+    async function load() {
+      try {
+        const r = await fetch("/api/tao-price");
+        if (!r.ok) throw new Error(r.status);
+        const p = await r.json();
+        document.getElementById("tao-usd").textContent =
+          "$" + p.usd.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+        const change = document.getElementById("tao-change");
+        const pct = p.change_24h_pct;
+        change.textContent = pct == null ? "" : `${pct >= 0 ? "▲" : "▼"} ${Math.abs(pct).toFixed(2)}%`;
+        change.className = pct == null ? "" : pct >= 0 ? "up" : "down";
+        chip.title = `TAO price in US dollars (${p.source})` + (pct == null ? "" : `\n24h change: ${pct >= 0 ? "+" : ""}${pct.toFixed(2)}%`);
+        chip.hidden = false;
+      } catch {
+        chip.hidden = true;
+      }
+    }
+    load();
+    setInterval(load, 60_000);
+  })();
 </script>
 </body>
 </html>

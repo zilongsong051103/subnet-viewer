@@ -27,6 +27,7 @@ from decimal import Decimal
 from concurrent.futures import ProcessPoolExecutor
 from contextlib import asynccontextmanager
 from pathlib import Path
+import urllib.request
 from urllib.parse import urlsplit
 
 import bittensor as bt
@@ -54,6 +55,7 @@ PRICE_HISTORY_RETRIES = 3  # the archive is flaky; retry a dropped point before 
 PRICE_HISTORY_WARM_INTERVAL = 1200  # 20 min: rebuild the shared history before its cache expires
 BURN_SNAPSHOT_MIN_STEP = 300  # metagraph snapshots at most every 300 blocks (24/day) for a short immunity period
 BURN_HISTORY_TTL = 600  # 10 min: the registration fee moves slowly, and each build is a burst of reads
+TAO_PRICE_TTL = 60  # the nav bar's TAO/USD price: a minute is plenty, and keeps us polite to the APIs
 REG_HISTORY_DAYS = 30
 REG_HISTORY_TTL = 1800  # 30 min for the daily counts; the snapshots behind them are kept far longer
 REG_SNAPSHOT_MAX = 130  # cap per subnet; below ~1,700 blocks of immunity the counts become a floor
@@ -871,6 +873,40 @@ async def subnet_list(client) -> list[dict]:
 
 def chain_error(e: Exception) -> HTTPException:
     return HTTPException(502, f"Chain query failed: {type(e).__name__}: {e}")
+
+
+def _get_json(url: str):
+    req = urllib.request.Request(url, headers={"User-Agent": "subnet-viewer", "Accept": "application/json"})
+    with urllib.request.urlopen(req, timeout=8) as resp:
+        return json.load(resp)
+
+
+def _tao_price_coingecko() -> dict:
+    d = _get_json("https://api.coingecko.com/api/v3/simple/price"
+                  "?ids=bittensor&vs_currencies=usd&include_24hr_change=true")["bittensor"]
+    return {"usd": float(d["usd"]), "change_24h_pct": d.get("usd_24h_change"), "source": "CoinGecko"}
+
+
+def _tao_price_okx() -> dict:
+    t = _get_json("https://www.okx.com/api/v5/market/ticker?instId=TAO-USDT")["data"][0]
+    last, open_24h = float(t["last"]), float(t["open24h"])
+    return {"usd": last, "change_24h_pct": (last / open_24h - 1) * 100 if open_24h else None, "source": "OKX"}
+
+
+async def tao_price() -> dict:
+    """TAO in US dollars with its 24h change. The chain has no USD price, so it comes
+    from CoinGecko (averaged across exchanges), or OKX's TAO/USDT if CoinGecko fails."""
+    for fetch in (_tao_price_coingecko, _tao_price_okx):
+        try:
+            return await asyncio.to_thread(fetch)
+        except Exception:
+            continue
+    raise HTTPException(502, "TAO price unavailable")
+
+
+@app.get("/api/tao-price")
+async def get_tao_price():
+    return await cached("tao_price", TAO_PRICE_TTL, tao_price)
 
 
 @app.get("/api/subnets")

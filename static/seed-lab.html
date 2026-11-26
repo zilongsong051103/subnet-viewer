@@ -146,6 +146,17 @@ color-scheme: dark;
   @keyframes brand-spin { to { transform: rotate(1turn); } }
   @media (prefers-reduced-motion: reduce) { .brand::before { animation: none; } }
   .navlinks { display: flex; gap: 2px; }
+  /* TAO's USD price beside the page links: a quiet chip, its 24h change in green or red. */
+  .tao-price {
+    display: inline-flex; align-items: baseline; gap: 6px; padding: 3px 10px; border-radius: 16px;
+    background: var(--hairline); color: var(--ink); font-size: 0.8125rem; text-decoration: none; white-space: nowrap;
+    font-variant-numeric: tabular-nums;
+  }
+  .tao-price:hover { background: var(--divider); }
+  .tao-price .tao-name { color: var(--ink-2); font-size: 0.75rem; }
+  .tao-price b { font-weight: 600; }
+  .tao-price .up { color: var(--good); }
+  .tao-price .down { color: var(--bad); }
   /* Material's text button; the page you are on is marked the way tabs are. */
   .navbtn {
     display: inline-flex; align-items: center; white-space: nowrap;
@@ -289,6 +300,9 @@ color-scheme: dark;
     <a class="navbtn" href="/">Dashboard</a>
     <a class="navbtn current" href="/seed-lab" aria-current="page">Seed Lab</a>
   </nav>
+  <a class="tao-price" id="tao-price" href="https://www.coingecko.com/en/coins/bittensor" target="_blank" rel="noopener noreferrer" hidden>
+    <span class="tao-name">TAO</span><b id="tao-usd"></b><span id="tao-change"></span>
+  </a>
   <div class="actions">
     <div class="theme" role="group" aria-label="Theme">
       <button type="button" data-theme-choice="system" title="Follow your device setting">Auto</button>
@@ -642,6 +656,32 @@ color-scheme: dark;
       try { localStorage.setItem(THEME_KEY, themeChoice); } catch {}
       applyTheme(themeChoice);
     }));
+</script>
+<script>
+  // TAO's USD price in the nav bar, from the server's cached market-data read; refreshed
+  // each minute, and simply left out if it can't be had.
+  (function () {
+    const chip = document.getElementById("tao-price");
+    async function load() {
+      try {
+        const r = await fetch("/api/tao-price");
+        if (!r.ok) throw new Error(r.status);
+        const p = await r.json();
+        document.getElementById("tao-usd").textContent =
+          "$" + p.usd.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+        const change = document.getElementById("tao-change");
+        const pct = p.change_24h_pct;
+        change.textContent = pct == null ? "" : `${pct >= 0 ? "▲" : "▼"} ${Math.abs(pct).toFixed(2)}%`;
+        change.className = pct == null ? "" : pct >= 0 ? "up" : "down";
+        chip.title = `TAO price in US dollars (${p.source})` + (pct == null ? "" : `\n24h change: ${pct >= 0 ? "+" : ""}${pct.toFixed(2)}%`);
+        chip.hidden = false;
+      } catch {
+        chip.hidden = true;
+      }
+    }
+    load();
+    setInterval(load, 60_000);
+  })();
 </script>
 </body>
 </html>
