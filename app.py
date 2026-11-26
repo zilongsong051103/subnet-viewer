@@ -329,6 +329,11 @@ async def warm_price_history(client) -> None:
         await asyncio.sleep(PRICE_HISTORY_WARM_INTERVAL)
 
 
+async def _query_at(client, block: int, item, netuid: int):
+    """One subnet's value of a storage item as of a (past) block."""
+    return await (await client.at(block)).query(item, [netuid])
+
+
 async def build_burn_history(client, netuid: int) -> dict:
     """The registration fee (burn) over the last day, at every block — rebuilt, not sampled.
 
@@ -341,8 +346,14 @@ async def build_burn_history(client, netuid: int) -> dict:
 
     Registration blocks come from metagraph snapshots spaced a little under the
     immunity period: a fresh UID can't be replaced until its immunity ends, so every
-    registration in the window shows up in at least one snapshot. The rebuilt last
-    value is checked against the live burn ("exact").
+    registration in the window shows up in at least one snapshot.
+
+    The burn parameters can change during the day (SN7's half-life went from 360 to
+    3,600 blocks one afternoon), so they're read at the window's start as well as now,
+    and where they differ the change block is found by bisection and the day rebuilt
+    piecewise. If the rebuilt end still misses the live burn (say an admin set the burn
+    outright), the first block where the rebuild and the chain disagree is found the
+    same way and the rebuild re-anchored there. "exact" says whether it then matches.
     """
     now = await client.block()
     start = now - BLOCKS_PER_DAY
@@ -371,7 +382,7 @@ async def build_burn_history(client, netuid: int) -> dict:
                 except Exception:
                     if attempt == PRICE_HISTORY_RETRIES - 1:
                         raise
-                    await asyncio.sleep(0.3 * (attempt + 1))
+                    await asyncio.sleep(2 * (attempt + 1))  # the archive rations historical reads
 
     immunity = int(graph["immunity_period"])
     step = max(BURN_SNAPSHOT_MIN_STEP, immunity - 100)
@@ -380,11 +391,26 @@ async def build_burn_history(client, netuid: int) -> dict:
     async def metagraph_at(block):
         return await (await client.at(block)).runtime(SubnetInfoRuntimeApi.get_metagraph, [netuid])
 
-    burn_start, start_ms, *older = await asyncio.gather(
+    # The parameters behind the burn, as integers the rebuild works in.
+    param_items = {
+        "hl": storage.SubtensorModule.BurnHalfLife,
+        "mult": storage.SubtensorModule.BurnIncreaseMult,  # U64F64: its raw bits
+        "lo": storage.SubtensorModule.MinBurn,
+        "hi": storage.SubtensorModule.MaxBurn,
+    }
+    as_int = lambda v: int(v["bits"] if isinstance(v, dict) else v)
+
+    async def param_at(name, block):
+        return as_int(await archived(lambda: _query_at(client, block, param_items[name], netuid)))
+
+    burn_start, start_ms, *rest = await asyncio.gather(
         archived(lambda: then.query(storage.SubtensorModule.Burn, [netuid])),
         archived(lambda: then.query(storage.Timestamp.Now)),
+        *(archived(lambda item=item: then.query(item, [netuid])) for item in param_items.values()),
         *(archived(lambda b=b: metagraph_at(b)) for b in snapshot_blocks),
     )
+    params_start = dict(zip(param_items, map(as_int, rest[:len(param_items)])))
+    older = rest[len(param_items):]
 
     registrations: Counter[int] = Counter()  # block -> neurons registered in it
     seen = set()
@@ -394,21 +420,74 @@ async def build_burn_history(client, netuid: int) -> dict:
                 seen.add((uid, block))
                 registrations[block] += 1
 
+    # Each parameter's timeline: (from block, value), a change found by bisecting
+    # between two blocks whose values differ. A value set in block c is the state from
+    # c on, but block c's own decay still used the old one (measured on SN7).
+    params_now = {"hl": int(hl), "mult": as_int(mult), "lo": int(min_burn), "hi": int(max_burn)}
+
+    async def changes(name, lo_b, lo_v, hi_b, hi_v):
+        if lo_v == hi_v:
+            return []
+        if hi_b - lo_b == 1:
+            return [(hi_b, hi_v)]
+        mid = (lo_b + hi_b) // 2
+        mid_v = await param_at(name, mid)
+        return [*await changes(name, lo_b, lo_v, mid, mid_v), *await changes(name, mid, mid_v, hi_b, hi_v)]
+
+    timeline = {name: [(start, params_start[name]),
+                       *await changes(name, start, params_start[name], now, params_now[name])]
+                for name in param_items}
+    param_changes = [{"block": b, "param": name, "from": tl[i - 1][1], "to": v}
+                     for name, tl in timeline.items() for i, (b, v) in enumerate(tl) if i]
+
+    def at(name, block):  # the parameter's value as of the end of block
+        value = timeline[name][0][1]
+        for b, v in timeline[name]:
+            if b > block:
+                break
+            value = v
+        return value
+
     # Integer math as the chain does it: the decay factor as I32F32 rounded to nearest,
     # the multiplier as its stored U64F64 bits, each step rounded down and clamped to
     # [MinBurn, MaxBurn]. (Truncating the factor instead drifts a rao or two at some
     # half-lives, e.g. SN24's 120 blocks.)
-    hl = int(hl)
-    decay_bits = int((Decimal(2) ** (Decimal(-1) / hl) * (1 << 32)).to_integral_value()) if hl > 0 else 1 << 32
-    mult_bits = int(mult["bits"] if isinstance(mult, dict) else mult)
-    lo, hi = int(min_burn), int(max_burn)
-    x = int(burn_start)
-    series = [x]
-    for block in range(start + 1, now + 1):
-        x = max(lo, min(hi, (x * decay_bits) >> 32))
-        for _ in range(registrations[block]):
-            x = max(lo, min(hi, (x * mult_bits) >> 64))
-        series.append(x)
+    decay_bits = {}
+
+    def decay(h):
+        if h not in decay_bits:
+            decay_bits[h] = int((Decimal(2) ** (Decimal(-1) / h) * (1 << 32)).to_integral_value()) if h > 0 else 1 << 32
+        return decay_bits[h]
+
+    def rebuild(from_block, x):  # the burn from from_block (where it is x) to now
+        out = [x]
+        for block in range(from_block + 1, now + 1):
+            p = block - 1  # this block's decay runs on the previous block's parameters
+            x = max(at("lo", p), min(at("hi", p), (x * decay(at("hl", p))) >> 32))
+            for _ in range(registrations[block]):
+                x = max(at("lo", block), min(at("hi", block), (x * at("mult", block)) >> 64))
+            out.append(x)
+        return out
+
+    series = rebuild(start, int(burn_start))
+
+    # Safety net: re-anchor at the first block the rebuild gets wrong, a few times over.
+    async def burn_at(block):
+        return int(await archived(lambda: _query_at(client, block, storage.SubtensorModule.Burn, netuid)))
+
+    good = start  # the rebuild is known right up to here
+    for _ in range(3):
+        if abs(series[-1] - int(burn_now)) <= 2:
+            break
+        lo_b, hi_b = good, now
+        while hi_b - lo_b > 1:
+            mid = (lo_b + hi_b) // 2
+            if abs(series[mid - start] - await burn_at(mid)) <= 2:
+                lo_b = mid
+            else:
+                hi_b = mid
+        series[hi_b - start:] = rebuild(hi_b, await burn_at(hi_b))
+        good = hi_b
 
     return {
         "start_block": start,
@@ -417,18 +496,88 @@ async def build_burn_history(client, netuid: int) -> dict:
         "end_ms": int(now_ms),
         "burn": series,  # rao, one value per block from start_block to end_block
         "registrations": sorted(registrations),
-        "min_tao": lo / RAO_PER_UNIT,
-        "max_tao": hi / RAO_PER_UNIT,
-        "half_life": hl,
-        "mult": mult_bits / 2**64,
+        "half_life": params_now["hl"],
+        "mult": params_now["mult"] / 2**64,
+        "min_tao": params_now["lo"] / RAO_PER_UNIT,
+        "max_tao": params_now["hi"] / RAO_PER_UNIT,
+        "param_changes": param_changes,  # burn parameters changed during the day, if any
         "exact": abs(series[-1] - int(burn_now)) <= 2,  # a rao or two of rounding is fine
         # For the dialog's chips.
         "burn_now_tao": int(burn_now) / RAO_PER_UNIT,
         "registrations_24h": sum(registrations.values()),
         "immunity_period": immunity,
+        "_params": params_now,  # (not sent) what the carry-forward needs
+        "_counts": dict(registrations),
         "registration_allowed": None if reg_allowed is None else bool(reg_allowed),
         "total_recycled_tao": None if recycled is None else int(recycled) / RAO_PER_UNIT,
     }
+
+
+def _public(d: dict) -> dict:
+    return {k: v for k, v in d.items() if not k.startswith("_")}
+
+
+async def burn_history(client, netuid: int) -> dict:
+    """The day's burn, built at most every BURN_HISTORY_TTL and carried to the current block.
+
+    The burn changes every block, so a cached day would trail the card's live fee by
+    up to the cache's age. Rebuilding is deterministic, though: from the cached day's
+    last value, the blocks since only need the live parameters and registrations
+    (current state, no archive reads). If a parameter moved, or the carried value
+    misses the live burn, the day is rebuilt from scratch instead.
+    """
+    key = ("burn1d", netuid)
+    base = await cached(key, BURN_HISTORY_TTL, lambda: build_burn_history(client, netuid))
+    now = await client.block()
+    gap = now - base["end_block"]
+    if gap <= 0:
+        return _public(base)
+    head = await client.at(now)
+    hl, mult, lo, hi, burn_now, now_ms, regs, allowed, recycled = await asyncio.gather(
+        head.query(storage.SubtensorModule.BurnHalfLife, [netuid]),
+        head.query(storage.SubtensorModule.BurnIncreaseMult, [netuid]),
+        head.query(storage.SubtensorModule.MinBurn, [netuid]),
+        head.query(storage.SubtensorModule.MaxBurn, [netuid]),
+        head.query(storage.SubtensorModule.Burn, [netuid]),
+        head.query(storage.Timestamp.Now),
+        head.query_map(storage.SubtensorModule.BlockAtRegistration, [netuid]),
+        optional(head.query(storage.SubtensorModule.NetworkRegistrationAllowed, [netuid])),
+        optional(head.query(storage.SubtensorModule.RAORecycledForRegistration, [netuid])),
+    )
+    params = {"hl": int(hl), "mult": int(mult["bits"] if isinstance(mult, dict) else mult),
+              "lo": int(lo), "hi": int(hi)}
+    new = Counter(int(b) for _, b in regs if base["end_block"] < int(b) <= now)
+    x, tail = base["burn"][-1], []
+    if params == base["_params"] and gap < base["immunity_period"]:  # a fresh UID is still in place
+        h = params["hl"]
+        decay = int((Decimal(2) ** (Decimal(-1) / h) * (1 << 32)).to_integral_value()) if h > 0 else 1 << 32
+        for block in range(base["end_block"] + 1, now + 1):
+            x = max(params["lo"], min(params["hi"], (x * decay) >> 32))
+            for _ in range(new[block]):
+                x = max(params["lo"], min(params["hi"], (x * params["mult"]) >> 64))
+            tail.append(x)
+    if not tail or abs(tail[-1] - int(burn_now)) > 2:  # couldn't carry it: build the day afresh
+        _cache.pop(key, None)
+        return _public(await cached(key, BURN_HISTORY_TTL, lambda: build_burn_history(client, netuid)))
+
+    start = base["start_block"] + gap
+    counts = {b: c for b, c in base["_counts"].items() if b > start} | dict(new)
+    ms_per_block = (base["end_ms"] - base["start_ms"]) / (base["end_block"] - base["start_block"])
+    return _public({
+        **base,
+        "start_block": start,
+        "end_block": now,
+        "start_ms": int(base["start_ms"] + gap * ms_per_block),
+        "end_ms": int(now_ms),
+        "burn": base["burn"][gap:] + tail,
+        "registrations": sorted(counts),
+        "registrations_24h": sum(counts.values()),
+        "param_changes": [c for c in base["param_changes"] if c["block"] > start],
+        "exact": True,
+        "burn_now_tao": int(burn_now) / RAO_PER_UNIT,
+        "registration_allowed": None if allowed is None else bool(allowed),
+        "total_recycled_tao": None if recycled is None else int(recycled) / RAO_PER_UNIT,
+    })
 
 
 # Registrations per day for the reg-fee dialog. The chain keeps no registration log,
@@ -774,9 +923,7 @@ async def get_registration_history(netuid: int = PathParam(ge=1, le=65535)):
 async def get_burn_history(netuid: int = PathParam(ge=1, le=65535)):
     """The last day's registration fee (burn), in TAO, for the on-click graph."""
     try:
-        history = await cached(("burn1d", netuid), BURN_HISTORY_TTL,
-                               lambda: build_burn_history(app.state.client, netuid))
-        return {"netuid": netuid, **history}
+        return {"netuid": netuid, **await burn_history(app.state.client, netuid)}
     except HTTPException:
         raise
     except Exception as e:
