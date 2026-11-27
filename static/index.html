@@ -241,15 +241,39 @@
   .burn-tip rect { fill: var(--surface); stroke: var(--ink-2); }
   .burn-tip-fee { fill: var(--ink); font-size: 12px; font-weight: 600; }
   .burn-tip-time { fill: var(--ink-2); font-size: 10px; }
-  /* A toggle button group: one outline around the set, the chosen one washed. */
-  .theme { display: inline-flex; border: 1px solid var(--rule); border-radius: 4px; overflow: hidden; }
+  /* MUI's ToggleButtonGroup: outlined buttons sharing their borders, the chosen one tinted primary. */
+  .theme { display: inline-flex; }
   .theme button {
-    border: 0; border-radius: 0; padding: 5px 11px; background: none; color: var(--ink-2);
-    font-size: 0.8125rem; font-weight: 500; letter-spacing: 0.02857em; text-transform: uppercase;
+    height: 40px; margin: 0; padding: 0 11px; border: 1px solid var(--divider); border-radius: 0;
+    background: none; color: var(--ink-2); font-size: 0.8125rem; font-weight: 500; line-height: 1.75;
+    letter-spacing: 0.02857em; text-transform: uppercase; transition: background-color 150ms, color 150ms;
   }
-  .theme button + button { border-left: 1px solid var(--rule); }
-  .theme button:hover { background: var(--hairline); }
+  .theme button + button { margin-left: -1px; border-left-color: transparent; }
+  .theme button:first-child { border-radius: 4px 0 0 4px; }
+  .theme button:last-child { border-radius: 0 4px 4px 0; }
+  .theme button:hover { background: var(--hairline); color: var(--ink); }
   .theme button[aria-pressed="true"] { background: var(--accent-soft); color: var(--accent); }
+  .theme button:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+  /* MUI's outlined Select (size small): the label floats in a notch in the border,
+     the drop arrow sits at the end, and focus turns border and label primary. */
+  .mui-select { position: relative; display: inline-flex; max-width: 100%; }
+  .mui-select select {
+    appearance: none; -webkit-appearance: none; height: 40px; min-width: 120px; padding: 0 32px 0 14px;
+    font: inherit; font-size: 1rem; color: var(--ink); background: transparent; cursor: pointer;
+    border: 1px solid var(--rule); border-radius: 4px; transition: border-color 150ms;
+  }
+  .mui-select select option { background: var(--surface); color: var(--ink); }
+  .mui-select select:hover { border-color: var(--ink); }
+  .mui-select select:focus { outline: none; border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); }
+  .mui-select label {
+    position: absolute; left: 9px; top: 0; transform: translateY(-50%); padding: 0 5px; pointer-events: none;
+    background: var(--surface); color: var(--ink-2); font-size: 0.75rem; line-height: 1; transition: color 150ms;
+  }
+  .mui-select select:focus + label { color: var(--accent); }
+  .mui-arrow {
+    position: absolute; right: 7px; top: 50%; width: 24px; height: 24px; transform: translateY(-50%);
+    fill: var(--ink-2); pointer-events: none;
+  }
   /* An outlined select, the shape Material gives its inputs. */
   select {
     font: inherit; color: var(--ink); background: var(--surface);
@@ -301,6 +325,12 @@
   .card.loading:not(.pending) { opacity: 0.55; }
   /* Not on the watch list: outlined rather than lifted, so it reads as a preview. */
   .card.preview { box-shadow: none; outline: 1px dashed var(--rule); outline-offset: -1px; }
+  /* Blank cards that fill out the last row, so an incomplete row leaves no hole. */
+  .card-filler {
+    align-self: stretch; min-height: 160px; display: grid; place-content: center; justify-items: center; gap: 6px;
+    border: 1px dashed var(--rule); border-radius: 4px; color: var(--ink-2); font-size: 0.8125rem; opacity: 0.7;
+  }
+  .card-filler svg { width: 32px; height: 32px; }
   .card.flash { animation: flash 1.2s ease-out; }
   @keyframes flash { from { box-shadow: 0 0 0 3px var(--accent), var(--shadow-1); } to { box-shadow: 0 0 0 3px transparent, var(--shadow-1); } }
   @media (prefers-reduced-motion: reduce) { .card.flash { animation: none; } }
@@ -347,6 +377,11 @@
   .stat.tappable:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
   .stat.tappable .stat-label { text-decoration: underline dotted; text-underline-offset: 2px; text-decoration-color: var(--accent); }
   .stat-label { color: var(--ink-2); font-size: 12px; line-height: 1.3; }
+  /* Where the subnet is in its epoch (one runs every `tempo` blocks), between the stats and the miners. */
+  /* The bar alone, tucked under the stats (which keep a 16px margin below); details on hover. */
+  .epoch { display: flex; margin: -12px 0 14px; cursor: help; }
+  .epoch-bar { flex: 1; height: 3px; border-radius: 2px; background: var(--hairline); overflow: hidden; }
+  .epoch-fill { display: block; height: 100%; width: 0; border-radius: 2px; background: var(--accent); }
   /* Where this subnet's alpha price ranks among all subnets: #1 is the dearest. */
   .rank { color: var(--ink); font-weight: 600; font-variant-numeric: tabular-nums; cursor: help; }
   .stat-line { white-space: nowrap; }
@@ -554,14 +589,20 @@
     <span class="tao-name">TAO</span><b id="tao-usd"></b><span id="tao-change"></span>
   </a>
   <div class="actions">
-    <label for="netuid" class="visually-hidden">Subnet</label>
-    <select id="netuid"><option value="">Loading…</option></select>
-    <label for="sort" class="visually-hidden">Order of the subnet list</label>
-    <select id="sort" title="Order of the subnet list">
-      <option value="netuid">By netuid</option>
-      <option value="price">By price rank</option>
-      <option value="emission">By emission rank</option>
-    </select>
+    <div class="mui-select">
+      <select id="netuid"><option value="">Loading…</option></select>
+      <label for="netuid">Subnet</label>
+      <svg class="mui-arrow" viewBox="0 0 24 24" aria-hidden="true"><path d="M7 10l5 5 5-5z"/></svg>
+    </div>
+    <div class="mui-select">
+      <select id="sort" title="Order of the subnet list">
+        <option value="netuid">By netuid</option>
+        <option value="price">By price rank</option>
+        <option value="emission">By emission rank</option>
+      </select>
+      <label for="sort">Sort by</label>
+      <svg class="mui-arrow" viewBox="0 0 24 24" aria-hidden="true"><path d="M7 10l5 5 5-5z"/></svg>
+    </div>
     <div class="theme" role="group" aria-label="Theme">
       <button type="button" data-theme-choice="system" title="Follow your device setting">Auto</button>
       <button type="button" data-theme-choice="light">Light</button>
@@ -689,6 +730,9 @@
           <span class="stat-label">Pool</span>
           <span class="stat-line"><span class="stat-value" data-field="pool"></span><span class="delta" data-field="pool-alpha"></span></span>
         </div>
+      </div>
+      <div class="epoch" data-field="epoch" hidden>
+        <span class="epoch-bar"><span class="epoch-fill" data-field="epoch-fill"></span></span>
       </div>
       <div class="table-wrap" data-field="table">
         <table>
@@ -1113,6 +1157,23 @@
     }
   }
 
+  // "45s", "29m", "1h 4m": a stretch of seconds, rounded for a glance.
+  const roughly = (secs) => secs < 60 ? `${Math.max(1, Math.round(secs))}s`
+    : secs < 3600 ? `${Math.round(secs / 60)}m` : `${Math.floor(secs / 3600)}h ${Math.round((secs % 3600) / 60)}m`;
+
+  // The epoch row, from the last data plus the 12 s blocks since it arrived; past the
+  // next epoch it carries on into the one after, until the next refresh catches up.
+  function paintEpoch(card) {
+    const e = card.epoch, row = card.field("epoch");
+    if (!e || !e.tempo) { row.hidden = true; return; }
+    const since = (e.blocks_since + (Date.now() - e.at) / 12_000) % e.tempo;
+    card.field("epoch-fill").style.width = `${(since / e.tempo) * 100}%`;
+    row.title = `Epoch: ${Math.floor(since)} / ${e.tempo} blocks, next in ${roughly((e.tempo - since) * 12)}.\n` +
+      `An epoch runs every ${e.tempo} blocks (about ${roughly(e.tempo * 12)}); the last was at block ` +
+      `${e.last_step.toLocaleString("en-US")}.`;
+    row.hidden = false;
+  }
+
   function renderCard(card, d) {
     const f = card.field;
     card.el.classList.remove("pending");
@@ -1212,6 +1273,8 @@
     const fullConsensus = d.miner_burn.full_consensus; // every miner, as the share's whole
     card.data = d;
     renderMinerRows(card);
+    card.epoch = d.epoch ? { ...d.epoch, at: Date.now() } : null;
+    paintEpoch(card);
     const totals = d.miner_totals;
     // The list now holds every active miner, so the totals are simply the whole:
     // the miners' share of all emission (the whole counts burned emission too), and
@@ -1333,6 +1396,7 @@
     requestAnimationFrame(() => {
       fitQueued = false;
       cards.forEach(fitStats);
+      fillLastRow();
     });
   });
 
@@ -1679,7 +1743,26 @@
       grid.append(card.el);
     }
     $("hint").hidden = order.length > 0;
+    fillLastRow();
     updatePicker();
+  }
+
+  // Blank cards after the last one, up to the end of its row (decoration only). The
+  // grid has as many columns as fit, so this reruns on resize.
+  function fillLastRow() {
+    grid.querySelectorAll(".card-filler").forEach((el) => el.remove());
+    const count = grid.querySelectorAll(".card").length;
+    const cols = getComputedStyle(grid).gridTemplateColumns.split(" ").length;
+    const missing = count && cols > 1 ? (cols - (count % cols)) % cols : 0;
+    for (let i = 0; i < missing; i++) {
+      const blank = document.createElement("div");
+      blank.className = "card-filler";
+      blank.setAttribute("aria-hidden", "true");
+      blank.innerHTML = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"
+        stroke-linecap="round" stroke-linejoin="round"><path d="M3 13h5l1.5 2.5h5L16 13h5"/>
+        <path d="M5.5 5h13L21 13v5a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1v-5z"/></svg>Empty`;
+      grid.append(blank);
+    }
   }
 
   function toggleWatch(netuid) {
@@ -1768,6 +1851,7 @@
     if (document.visibilityState !== "visible") return; // paused in a background tab
     if (Date.now() >= nextRefreshAt) refreshAll();
     else drawRing();
+    cards.forEach(paintEpoch); // the epoch bars move between refreshes
   }, 1000);
   document.addEventListener("visibilitychange", () => {
     if (document.visibilityState === "visible" && Date.now() >= nextRefreshAt) refreshAll();

@@ -174,15 +174,20 @@ color-scheme: dark;
   h2 { font-size: 1rem; font-weight: 500; margin: 0 0 10px; }
   p { margin: 0 0 10px; }
 
-  .theme { display: inline-flex; border: 1px solid var(--rule); border-radius: 4px; overflow: hidden; }
+  /* MUI's ToggleButtonGroup: outlined buttons sharing their borders, the chosen one tinted primary. */
+  .theme { display: inline-flex; }
   .theme button {
-    border: 0; border-radius: 0; padding: 5px 11px; background: none; color: var(--ink-2); cursor: pointer;
-    font: 500 0.8125rem Roboto, "Helvetica Neue", Helvetica, Arial, sans-serif;
-    letter-spacing: 0.02857em; text-transform: uppercase;
+    height: 40px; margin: 0; padding: 0 11px; border: 1px solid var(--divider); border-radius: 0;
+    background: none; color: var(--ink-2); cursor: pointer;
+    font: 500 0.8125rem Roboto, "Helvetica Neue", Helvetica, Arial, sans-serif; line-height: 1.75;
+    letter-spacing: 0.02857em; text-transform: uppercase; transition: background-color 150ms, color 150ms;
   }
-  .theme button + button { border-left: 1px solid var(--rule); }
-  .theme button:hover { background: var(--hairline); }
+  .theme button + button { margin-left: -1px; border-left-color: transparent; }
+  .theme button:first-child { border-radius: 4px 0 0 4px; }
+  .theme button:last-child { border-radius: 0 4px 4px 0; }
+  .theme button:hover { background: var(--hairline); color: var(--ink); }
   .theme button[aria-pressed="true"] { background: var(--accent-soft); color: var(--accent); }
+  .theme button:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
   /* A text button, like the dashboard's. */
   .logout {
     font: 500 0.8125rem Roboto, "Helvetica Neue", Helvetica, Arial, sans-serif;

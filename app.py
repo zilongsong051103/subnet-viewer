@@ -780,6 +780,13 @@ async def subnet_summary(client, netuid: int) -> dict:
         },
         "block": block,
         "tempo": graph["tempo"],
+        # An epoch runs every `tempo` blocks, each subnet on its own phase (measured:
+        # last_step steps by exactly tempo), so this is where the subnet is in it.
+        "epoch": {
+            "tempo": int(graph["tempo"]),
+            "last_step": int(graph["last_step"]),
+            "blocks_since": int(graph["blocks_since_last_step"]),
+        },
         "epochs_per_day": BLOCKS_PER_DAY / (graph["tempo"] + 1),
         # 0 when the subnet gets no emission at all (then there is nothing to burn).
         "alpha_emission_per_block": graph["alpha_out_emission"] / RAO_PER_UNIT,
